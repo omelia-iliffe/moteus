@@ -304,6 +304,7 @@ class Stm32Index {
         }();
         if (mbed == NC) { continue; }
         index_.emplace(mbed, MbedMapPull(cfg.pull));
+        pull_ = cfg.pull;
       }
     }
     if (!index_) {
@@ -316,7 +317,11 @@ class Stm32Index {
     if (error_ != aux::AuxError::kNone) { return; }
 
     const bool old_raw = status->raw;
-    status->raw = index_->read() ? true : false;
+    if(pull_ == Pin::Pull::kPullUp) {
+      status->raw = index_->read() ? false : true;
+    } else {
+      status->raw = index_->read() ? true : false;
+    }
     status->value = status->raw && !old_raw;
     status->active = true;
   }
@@ -326,6 +331,7 @@ class Stm32Index {
  private:
   aux::AuxError error_ = aux::AuxError::kNone;
   std::optional<DigitalIn> index_;
+  Pin::Pull pull_;
 };
 
 enum RequireCs {
