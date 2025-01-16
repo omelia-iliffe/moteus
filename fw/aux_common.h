@@ -30,15 +30,26 @@ struct Spi {
       kAs5047,
       kIcPz,
       kMa732,
+      kMa600,
 
       kNumModes,
     };
     Mode mode = kOnboardAs5047;
     uint32_t rate_hz = 12000000;
 
-    // For now, only the MA732 uses these.
+    // For now, only the MA732/MA600 uses these.
     uint16_t filter_us = 64;
     uint8_t bct = 0;
+
+    enum Trim {
+      kNone,
+      kTrimX,
+      kTrimY,
+
+      // For tracking the number of possible enumerations.
+      kSize,
+    };
+    Trim trim = kNone;
 
     template <typename Archive>
     void Serialize(Archive* a) {
@@ -46,6 +57,7 @@ struct Spi {
       a->Visit(MJ_NVP(rate_hz));
       a->Visit(MJ_NVP(filter_us));
       a->Visit(MJ_NVP(bct));
+      a->Visit(MJ_NVP(trim));
     }
   };
   struct Status {
@@ -317,6 +329,7 @@ struct Pin {
     kDigitalInput,
     kDigitalOutput,
     kAnalogInput,
+    kPwmOut,
 
     kLength,
   };
@@ -347,6 +360,7 @@ struct AuxConfig {
   aux::Index::Config index;
   aux::SineCosine::Config sine_cosine;
   int32_t i2c_startup_delay_ms = 30;
+  int32_t pwm_period_us = 1000;
 
   static constexpr size_t kNumPins = 5;
   std::array<Pin, kNumPins> pins = { {} };
@@ -361,6 +375,7 @@ struct AuxConfig {
     a->Visit(MJ_NVP(index));
     a->Visit(MJ_NVP(sine_cosine));
     a->Visit(MJ_NVP(i2c_startup_delay_ms));
+    a->Visit(MJ_NVP(pwm_period_us));
     a->Visit(MJ_NVP(pins));
   }
 };
@@ -377,6 +392,8 @@ enum class AuxError {
   kAdcPinError,
   kSineCosinePinError,
   kUartPinError,
+  kPwmPinError,
+  kMaXXXConfigError,
 
   kLength,
 };
@@ -397,6 +414,7 @@ struct AuxStatus {
 
   uint8_t analog_bit_active = 0;
   std::array<float, 5> analog_inputs = { {} };
+  std::array<float, 5> pwm = { {} };
 
   // Increases anytime the configuration changes.
   uint8_t epoch = 0;
@@ -415,6 +433,7 @@ struct AuxStatus {
     a->Visit(MJ_NVP(pins));
     a->Visit(MJ_NVP(analog_bit_active));
     a->Visit(MJ_NVP(analog_inputs));
+    a->Visit(MJ_NVP(pwm));
     a->Visit(MJ_NVP(epoch));
   }
 };
@@ -437,6 +456,21 @@ struct IsEnum<moteus::aux::Spi::Config::Mode> {
         { M::kAs5047, "ext_as5047" },
         { M::kIcPz, "ic_pz" },
         { M::kMa732, "ma732" },
+        { M::kMa600, "ma600" },
+      }};
+  }
+};
+
+template <>
+struct IsEnum<moteus::aux::Spi::Config::Trim> {
+  static constexpr bool value = true;
+
+  using T = moteus::aux::Spi::Config::Trim;
+  static std::array<std::pair<T, const char*>, T::kSize> map() {
+    return {{
+        { T::kNone, "none" },
+        { T::kTrimX, "x" },
+        { T::kTrimY, "y" },
       }};
   }
 };
@@ -499,6 +533,7 @@ struct IsEnum<moteus::aux::Pin::Mode> {
         { P::kDigitalInput, "digital_in" },
         { P::kDigitalOutput, "digital_out" },
         { P::kAnalogInput, "analog_in" },
+        { P::kPwmOut, "pwm_out" },
       }};
   }
 };
@@ -538,6 +573,8 @@ struct IsEnum<moteus::aux::AuxError> {
         { A::kAdcPinError, "adc_pin_error" },
         { A::kSineCosinePinError, "sine_cosine_pin_error" },
         { A::kUartPinError, "uart_pin_error" },
+        { A::kPwmPinError, "pwm_pin_error" },
+        { A::kMaXXXConfigError, "maxxx_config" },
       }};
   }
 };

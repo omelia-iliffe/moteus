@@ -27,6 +27,7 @@
 #include "fw/millisecond_timer.h"
 #include "fw/motor_driver.h"
 #include "fw/moteus_hw.h"
+#include "fw/stm32_digital_output.h"
 
 namespace moteus {
 
@@ -57,7 +58,14 @@ class Drv8323 : public MotorDriver {
   // Return true for success, false for failure.
   EnableResult StartEnable(bool) override;
 
-  void Power(bool) override;
+  void PowerOn() override {
+    hiz_.set();
+  }
+
+  void PowerOff() override {
+    hiz_.clear();
+  }
+
   bool fault() override MOTEUS_CCM_ATTRIBUTE;
 
   void PollMillisecond();
@@ -193,16 +201,16 @@ class Drv8323 : public MotorDriver {
          ((g_measured_hw_rev <= 6) ? 370 :
           (g_measured_hw_rev <= 7) ? 50 :
           100) :
-        g_measured_hw_family == 1 ?
-         150 :
+        g_measured_hw_family == 1 ? 150 :
+        g_measured_hw_family == 2 ? 80 :
         invalid_int();
     uint16_t idriven_hs_ma =
         g_measured_hw_family == 0 ?
          ((g_measured_hw_rev <= 6) ? 740 :
           (g_measured_hw_rev <= 7) ? 100 :
           200) :
-        g_measured_hw_family == 1 ?
-         300 :
+        g_measured_hw_family == 1 ? 300 :
+        g_measured_hw_family == 2 ? 60 :
         invalid_int();
 
 
@@ -214,16 +222,16 @@ class Drv8323 : public MotorDriver {
          ((g_measured_hw_rev <= 6) ? 370 :
           (g_measured_hw_rev <= 7) ? 50 :
           100) :
-        g_measured_hw_family == 1 ?
-         150 :
+        g_measured_hw_family == 1 ? 150 :
+        g_measured_hw_family == 2 ? 60 :
         invalid_int();
     uint16_t idriven_ls_ma =
         g_measured_hw_family == 0 ?
          ((g_measured_hw_rev <= 6) ? 740 :
           (g_measured_hw_rev <= 7) ? 100 :
           200) :
-        g_measured_hw_family == 1 ?
-         300 :
+        g_measured_hw_family == 1 ? 300 :
+        g_measured_hw_family == 2 ? 20 :
         invalid_int();
 
 
@@ -234,8 +242,8 @@ class Drv8323 : public MotorDriver {
          ((g_measured_hw_rev <= 6) ? 50 :
           (g_measured_hw_rev <= 7) ? 200 :
           50) :
-        g_measured_hw_family == 1 ?
-         50 :
+        g_measured_hw_family == 1 ? 50 :
+        g_measured_hw_family == 2 ? 50 :
         invalid_int();
     OcpMode ocp_mode = OcpMode::kLatchedFault;
     uint8_t ocp_deg_us = 4;  // valid options of 2, 4, 6, 8
@@ -248,8 +256,8 @@ class Drv8323 : public MotorDriver {
          ((g_measured_hw_rev <= 5) ? 260 :
           (g_measured_hw_rev <= 7) ? 450 :
           700) :
-        g_measured_hw_family == 1 ?
-         700 :
+        g_measured_hw_family == 1 ? 700 :
+        g_measured_hw_family == 2 ? 700 :
         invalid_int();
 
 
@@ -304,6 +312,8 @@ class Drv8323 : public MotorDriver {
  private:
   class Impl;
   mjlib::micro::PoolPtr<Impl> impl_;
+
+  Stm32DigitalOutput hiz_;
 };
 
 }

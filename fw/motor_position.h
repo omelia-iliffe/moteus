@@ -36,7 +36,7 @@ class MotorPosition {
  public:
   static constexpr int kNumSources = 3;
   static constexpr int kHallCounts = 6;
-  static constexpr int kCompensationSize = 32;
+  static constexpr int kCompensationSize = 256;
 
   struct SourceConfig {
     uint8_t aux_number = 1;
@@ -64,6 +64,7 @@ class MotorPosition {
     float offset = 0.0f;
     int8_t sign = 1;
     int32_t debug_override = -1;
+    float timeout_s = 0.2f;
 
     enum Reference {
       kRotor,
@@ -87,7 +88,11 @@ class MotorPosition {
     //  3     24-31          28
     //  ... etc ...
     //  31    248-255        252
-    std::array<float, kCompensationSize> compensation_table = {};
+    std::array<int8_t, kCompensationSize> compensation_table = {};
+    float compensation_scale = 0.0f;
+
+    // This is not serialized, but is calculated during configuration.
+    bool cached_any_compensation_enabled = false;
 
     template <typename Archive>
     void Serialize(Archive* a) {
@@ -99,9 +104,11 @@ class MotorPosition {
       a->Visit(MJ_NVP(offset));
       a->Visit(MJ_NVP(sign));
       a->Visit(MJ_NVP(debug_override));
+      a->Visit(MJ_NVP(timeout_s));
       a->Visit(MJ_NVP(reference));
       a->Visit(MJ_NVP(pll_filter_hz));
       a->Visit(MJ_NVP(compensation_table));
+      a->Visit(MJ_NVP(compensation_scale));
     }
   };
 
@@ -145,6 +152,10 @@ class MotorPosition {
     // should be less than 1.0f, otherwise greater.
     float rotor_to_output_ratio = 1.0f;
 
+    // Set if you want to enable ratios greater than 1.0, which should
+    // be extremely rare as most motors use a reducer.
+    bool rotor_to_output_override = false;
+
     Config() {
       // The factory default is to get rotor position directly from
       // the onboard SPI encoder (attached to aux1).
@@ -159,6 +170,7 @@ class MotorPosition {
       a->Visit(MJ_NVP(commutation_source));
       a->Visit(MJ_NVP(output));
       a->Visit(MJ_NVP(rotor_to_output_ratio));
+      a->Visit(MJ_NVP(rotor_to_output_override));
     }
   };
 
@@ -204,6 +216,7 @@ class MotorPosition {
       kMotorNotConfigured,
       kInvalidConfig,
       kSourceError,
+      kDiscontinuousOffset,
 
       kNumErrors,
     };
@@ -221,6 +234,7 @@ class MotorPosition {
     // The "relative" position is initialized to 0 at power on (or on
     // a 0 reset).
     bool position_relative_valid = false;
+    bool position_relative_ever_valid = false;
     int64_t position_relative_raw = 0;
     float position_relative = 0.0f;
 
@@ -267,6 +281,7 @@ class MotorPosition {
       a->Visit(MJ_NVP(sources));
       a->Visit(MJ_NVP(epoch));
       a->Visit(MJ_NVP(position_relative_valid));
+      a->Visit(MJ_NVP(position_relative_ever_valid));
       a->Visit(MJ_NVP(position_relative_raw));
       a->Visit(MJ_NVP(position_relative));
       a->Visit(MJ_NVP(position_relative_modulo));
@@ -402,6 +417,20 @@ class MotorPosition {
 
     status_.epoch = old_epoch + 1;
 
+    for (size_t i = 0; i < motor_.offset.size(); i++) {
+      const size_t next = (i + 1) % motor_.offset.size();
+
+      const auto delta = std::abs(motor_.offset[next] - motor_.offset[i]);
+      if (delta > 3.5f) {
+        // These offsets are unlikely to be suitable for
+        // interpolation, trigger a fault.  They may have been
+        // generated with an old version of moteus_tool that performed
+        // per-bin wrapping.
+        status_.error = Status::kDiscontinuousOffset;
+        return;
+      }
+    }
+
     for (size_t i = 0; i < config_.sources.size(); i++) {
       auto& source_config = config_.sources[i];
 
@@ -411,6 +440,16 @@ class MotorPosition {
       source_config.i2c_device =
           std::min<uint8_t>(source_config.i2c_device,
                             aux_status_[0]->i2c.devices.size());
+
+      source_config.cached_any_compensation_enabled = false;
+      if (source_config.compensation_scale != 0.0f) {
+        for (const auto value : source_config.compensation_table) {
+          if (value != 0.0f) {
+            source_config.cached_any_compensation_enabled = true;
+            break;
+          }
+        }
+      }
 
       if (source_config.incremental_index > 2) {
         source_config.incremental_index = 2;
@@ -423,7 +462,34 @@ class MotorPosition {
       const auto* aux_config = aux_config_[source_config.aux_number - 1];
 
       switch (source_config.type) {
+        case SourceConfig::kUart: {
+          using M = aux::UartEncoder::Config::Mode;
+          const auto mode = aux_config->uart.mode;
+          if (mode == M::kAksim2) {
+            source_config.cpr = 4194304;
+          } else if (mode == M::kCuiAmt21) {
+            source_config.cpr = 16384;
+          }
+          const float source_rate_hz =
+              1000000.0f /
+              aux_config->uart.poll_rate_us;
+          const float max_pll_hz = source_rate_hz / 10.0f;
+          source_config.pll_filter_hz =
+              std::min(source_config.pll_filter_hz, max_pll_hz);
+          break;
+        }
         case SourceConfig::kSpi: {
+          // For some source types, we know what the CPRs have to be.
+          using M = aux::Spi::Config::Mode;
+          const auto mode = aux_config->spi.mode;
+          if (mode == M::kAs5047 || mode == M::kOnboardAs5047) {
+            source_config.cpr = 16384;
+          } else if (mode == M::kMa732 || mode == M::kMa600) {
+            source_config.cpr = 65536;
+          } else if (mode == M::kIcPz) {
+            source_config.cpr = 16777216;
+          }
+
           break;
         }
         case SourceConfig::kI2C: {
@@ -517,6 +583,14 @@ class MotorPosition {
          config_.rotor_to_output_ratio);
 
 
+    if (config_.rotor_to_output_ratio > 1.0f &&
+        !config_.rotor_to_output_override) {
+      // A non-reducer gear ratio has been configured, without the
+      // necessary override.  Bail.
+      status_.error = Status::kInvalidConfig;
+      return;
+    }
+
     // If we have a reference source, check it out.
     if (config_.output.reference_source >= 0) {
       config_.output.reference_source = std::min<int8_t>(
@@ -590,15 +664,11 @@ class MotorPosition {
     if (commutation_status.active_theta) {
       const float ratio =
           commutation_status.filtered_value / commutation_config.cpr;
-      const int offset_size = motor_.offset.size();
-      const int offset_index =
-          std::min<int>(offset_size - 1, ratio * offset_size);
-      // MJ_ASSERT(offset_index >= 0 && offset_index < offset_size);
 
       status_.theta_valid = true;
       status_.electrical_theta = WrapZeroToTwoPi(
           ratio * commutation_pole_scale_ / commutation_rotor_scale_ +
-          motor_.offset[offset_index]);
+          lerp(motor_.offset, 1.0f, ratio));
     }
   }
 
@@ -619,12 +689,13 @@ class MotorPosition {
 
       // If this is our very first relative position output, select
       // our modulo so that we start at position 0.
-      if (!status_.position_relative_valid) {
+      if (!status_.position_relative_ever_valid) {
         status_.position_relative_modulo = -scaled_int_encoder_ratio;
       }
 
       // We can update our relative position at least.
       status_.position_relative_valid = true;
+      status_.position_relative_ever_valid = true;
       const auto old_position_relative_raw = status_.position_relative_raw;
 
       // We update our relative position by adding in the current
@@ -875,6 +946,8 @@ class MotorPosition {
         }
       }
 
+      const float cpr = config.cpr;
+
       if (config.debug_override >= 0) {
         status.active_theta = true;
         status.active_velocity = true;
@@ -883,47 +956,34 @@ class MotorPosition {
         status.compensated_value = config.debug_override;
         status.filtered_value = config.debug_override;
         updated = true;
-      } else {
-        const int bin_size = std::max<int>(1, config.cpr / kCompensationSize);
-        // Perform compensation.
-        const int left_offset =
-            ((status.offset_value - bin_size / 2) *
-             kCompensationSize / config.cpr + kCompensationSize) %
-            kCompensationSize;
-        const int right_offset = (left_offset + 1) % kCompensationSize;
-        const int delta =
-            (status.offset_value + config.cpr -
-             left_offset * bin_size -
-             bin_size / 2) % bin_size;
-        const float fraction =
-            static_cast<float>(delta) / bin_size;
-        const float left_comp = config.compensation_table[left_offset];
-        const float right_comp = config.compensation_table[right_offset];
-        const float comp_fraction =
-            (right_comp - left_comp) * fraction + left_comp;
-
+      } else if (config.cached_any_compensation_enabled) {
         status.compensated_value =
             WrapCpr(
                 status.offset_value +
-                comp_fraction * config.cpr, config.cpr);
+                lerp(config.compensation_table,
+                     config.compensation_scale / 127.0f,
+                     static_cast<float>(status.offset_value) /
+                     cpr) * cpr,
+                cpr);
+      } else {
+        status.compensated_value = status.offset_value;
       }
+
+      status.time_since_update += dt;
 
       if (!status.active_theta &&
           !status.active_velocity) {
         continue;
       }
 
-      status.time_since_update += dt;
-
       status.filtered_value += dt * status.velocity;
-
-      const float cpr = config.cpr;
 
       if (updated) {
         if (!old_active_velocity && status.active_velocity) {
           // This is our first update.  Just snap to the position.
           status.filtered_value = status.compensated_value;
           status.velocity = 0;
+          status.time_since_update = 0.0f;
         } else if (!old_active_theta && status.active_theta) {
           // Our velocity was valid before, so leave it alone.
           status.filtered_value = status.compensated_value;
@@ -945,7 +1005,7 @@ class MotorPosition {
           // We don't let our velocity get beyond 1 revolution in 8
           // encoder samples.
           const float max_velocity =
-              0.125f * config.cpr / status.time_since_update;
+              0.125f * cpr / status.time_since_update;
           if (status.velocity > max_velocity) {
             status.velocity = max_velocity;
           } else if (status.velocity < -max_velocity) {
@@ -957,6 +1017,12 @@ class MotorPosition {
         }
 
         status.time_since_update = 0.0f;
+      } else {
+        if (status.time_since_update > config.timeout_s) {
+          status.active_velocity = false;
+          status.active_theta = false;
+          status.active_absolute = false;
+        }
       }
 
       status.filtered_value = WrapCpr(status.filtered_value, cpr);
@@ -1063,6 +1129,27 @@ class MotorPosition {
     status_.homed = Status::kOutput;
   }
 
+  template <typename Array>
+  static float lerp(const Array& array, float scale, float ratio) {
+    const auto array_size = array.size();
+
+    const auto left_index =
+        std::min<int>(array_size - 1, ratio * array_size);
+
+    const auto right_index = (left_index + 1) % array_size;
+    const auto fraction =
+        (ratio - static_cast<float>(left_index) / array_size) * array_size;
+    const float left_comp = array[left_index] * scale;
+    const float right_comp = array[right_index] * scale;
+
+    // You might think that
+    //
+    // left_comp + (right_comp - left_comp) * fraction
+    //
+    // would be faster, but experiments prove that not to be the case.
+    return (left_comp * (1.0f - fraction)) + (right_comp * fraction);
+  }
+
   Config config_;
   BldcServoMotor motor_;
   Status status_;
@@ -1143,6 +1230,7 @@ struct IsEnum<moteus::MotorPosition::Status::Error> {
         { E::kMotorNotConfigured, "motor_not_conf" },
         { E::kInvalidConfig, "invalid_config" },
         { E::kSourceError, "source_error" },
+        { E::kDiscontinuousOffset, "discontinuous_offset" },
       }};
   }
 };

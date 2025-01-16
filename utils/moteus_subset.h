@@ -50,22 +50,27 @@ struct ServoStats {
 
   float torque_Nm = 0.0f;
 
+  float filt_fet_temp_C = 0.0f;
+
   float d_A = 0.0f;
   float q_A = 0.0f;
 
   float velocity = 0.0f;
   float velocity_filt = 0.0f;
 
-  struct PidPosition {
+  struct PidState {
     float error = 0.0;
+    float command = 0.0;
 
     template <typename Archive>
     void Serialize(Archive* a) {
       a->Visit(MJ_NVP(error));
+      a->Visit(MJ_NVP(command));
     }
   };
 
-  PidPosition pid_position;
+  PidState pid_q;
+  PidState pid_position;
 
   uint32_t final_timer = 0;
   uint32_t total_timer = 0;
@@ -78,12 +83,15 @@ struct ServoStats {
     a->Visit(MJ_NVP(position));
     a->Visit(MJ_NVP(torque_Nm));
 
+    a->Visit(MJ_NVP(filt_fet_temp_C));
+
     a->Visit(MJ_NVP(d_A));
     a->Visit(MJ_NVP(q_A));
 
     a->Visit(MJ_NVP(velocity));
     a->Visit(MJ_NVP(velocity_filt));
 
+    a->Visit(MJ_NVP(pid_q));
     a->Visit(MJ_NVP(pid_position));
 
     a->Visit(MJ_NVP(final_timer));
@@ -96,6 +104,7 @@ struct Firmware {
   std::array<uint32_t, 3> serial_number = {};
   uint32_t model = 0;
   uint8_t hwrev = 0;
+  uint8_t family = 0;
 
   template <typename Archive>
   void Serialize(Archive* a) {
@@ -103,6 +112,7 @@ struct Firmware {
     a->Visit(MJ_NVP(serial_number));
     a->Visit(MJ_NVP(model));
     a->Visit(MJ_NVP(hwrev));
+    a->Visit(MJ_NVP(family));
   }
 };
 

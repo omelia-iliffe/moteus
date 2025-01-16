@@ -162,6 +162,7 @@ class Register(enum.IntEnum):
     Q_CURRENT = 0x004
     D_CURRENT = 0x005
     ABS_POSITION = 0x006
+    POWER = 0x007
     MOTOR_TEMPERATURE = 0x00a
     TRAJECTORY_COMPLETE = 0x00b
     REZERO_STATE = 0x00c
@@ -199,6 +200,7 @@ class Register(enum.IntEnum):
     COMMAND_VELOCITY_LIMIT = 0x028
     COMMAND_ACCEL_LIMIT = 0x029
     COMMAND_FIXED_VOLTAGE_OVERRIDE = 0x02a
+    COMMAND_ILIMIT_SCALE = 0x02b
 
     POSITION_KP = 0x030
     POSITION_KI = 0x031
@@ -220,6 +222,7 @@ class Register(enum.IntEnum):
     COMMAND_WITHIN_KD_SCALE = 0x044
     COMMAND_WITHIN_MAX_TORQUE = 0x045
     COMMAND_WITHIN_TIMEOUT = 0x046
+    COMMAND_WITHIN_ILIMIT_SCALE = 0x047
 
     ENCODER_0_POSITION = 0x050
     ENCODER_0_VELOCITY = 0x051
@@ -249,6 +252,17 @@ class Register(enum.IntEnum):
     MILLISECOND_COUNTER = 0x070
     CLOCK_TRIM = 0x071
 
+    AUX1_PWM1 = 0x076,
+    AUX1_PWM2 = 0x077,
+    AUX1_PWM3 = 0x078,
+    AUX1_PWM4 = 0x079,
+    AUX1_PWM5 = 0x07a,
+    AUX2_PWM1 = 0x07b,
+    AUX2_PWM2 = 0x07c,
+    AUX2_PWM3 = 0x07d,
+    AUX2_PWM4 = 0x07e,
+    AUX2_PWM5 = 0x07f,
+
     REGISTER_MAP_VERSION = 0x102
     SERIAL_NUMBER = 0x120
     SERIAL_NUMBER1 = 0x120
@@ -263,6 +277,16 @@ class Register(enum.IntEnum):
 
     DRIVER_FAULT1 = 0x140
     DRIVER_FAULT2 = 0x141
+
+    UUID1 = 0x150
+    UUID2 = 0x151
+    UUID3 = 0x152
+    UUID4 = 0x153
+
+    UUID_MASK1 = 0x0154
+    UUID_MASK2 = 0x0155
+    UUID_MASK3 = 0x0156
+    UUID_MASK4 = 0x0157
 
 
 class Mode(enum.IntEnum):
@@ -299,6 +323,7 @@ class QueryResolution:
     q_current = mp.IGNORE
     d_current = mp.IGNORE
     abs_position = mp.IGNORE
+    power = mp.IGNORE
     motor_temperature = mp.IGNORE
     trajectory_complete = mp.IGNORE
     rezero_state = mp.IGNORE
@@ -329,6 +354,7 @@ class PositionResolution:
     velocity_limit = mp.F32
     accel_limit = mp.F32
     fixed_voltage_override = mp.F32
+    ilimit_scale = mp.F32
 
 
 class VFOCResolution:
@@ -340,6 +366,19 @@ class VFOCResolution:
 class CurrentResolution:
     d_A = mp.F32
     q_A = mp.F32
+
+
+class PwmResolution:
+    aux1_pwm1 = mp.INT16
+    aux1_pwm2 = mp.INT16
+    aux1_pwm3 = mp.INT16
+    aux1_pwm4 = mp.INT16
+    aux1_pwm5 = mp.INT16
+    aux2_pwm1 = mp.INT16
+    aux2_pwm2 = mp.INT16
+    aux2_pwm3 = mp.INT16
+    aux2_pwm4 = mp.INT16
+    aux2_pwm5 = mp.INT16
 
 
 class Parser(mp.RegisterParser):
@@ -370,6 +409,9 @@ class Parser(mp.RegisterParser):
 
     def read_current(self, resolution):
         return self.read_mapped(resolution, 1.0, 0.1, 0.001)
+
+    def read_power(self, resolution):
+        return self.read_mapped(resolution, 10.0, 0.05, 0.0001)
 
     def ignore(self, resolution):
         self._offset += mp.resolution_size(resolution)
@@ -407,6 +449,9 @@ class Writer(mp.WriteFrame):
     def write_current(self, value, resolution):
         self.write_mapped(value, 1.0, 0.1, 0.001, resolution)
 
+    def write_power(self, value, resolution):
+        self.write_mapped(value, 10.0, 0.05, 0.0001, resolution)
+
 
 def parse_register(parser, register, resolution):
     if register == Register.MODE:
@@ -423,6 +468,8 @@ def parse_register(parser, register, resolution):
         return parser.read_current(resolution)
     elif register == Register.ABS_POSITION:
         return parser.read_position(resolution)
+    elif register == Register.POWER:
+        return parser.read_power(resolution)
     elif register == Register.TRAJECTORY_COMPLETE:
         return parser.read_int(resolution)
     elif register == Register.HOME_STATE or register == Register.REZERO_STATE:
@@ -494,6 +541,9 @@ def parse_register(parser, register, resolution):
         return parser.read_int(resolution)
     elif register == Register.CLOCK_TRIM:
         return parser.read_int(resolution)
+    elif (register >= Register.AUX1_PWM1 and
+          register <= Register.AUX2_PWM5):
+        return parser.read_pwm(resolution)
     else:
         # We don't know what kind of value this is, so we don't know
         # the units.
@@ -517,7 +567,7 @@ class Result:
     id = None
     arbitration_id = None
     bus = None
-    values = []
+    values = {}
 
     def __repr__(self):
         value_str = ', '.join(['{}(0x{:03x}): {}'.format(Register(key).name, key, value)
@@ -596,6 +646,7 @@ class Controller:
                  position_resolution=PositionResolution(),
                  vfoc_resolution=VFOCResolution(),
                  current_resolution=CurrentResolution(),
+                 pwm_resolution=PwmResolution(),
                  transport=None,
                  can_prefix=0x0000):
         self.id = id
@@ -603,6 +654,7 @@ class Controller:
         self.position_resolution = position_resolution
         self.vfoc_resolution = vfoc_resolution
         self.current_resolution = current_resolution
+        self.pwm_resolution = pwm_resolution
         self.transport = transport
         self._parser = make_parser(id)
         self._can_prefix = can_prefix
@@ -618,6 +670,12 @@ class Controller:
         # method that is hookable.
         self.transport = get_singleton_transport()
         return self.transport
+
+    async def flush_transport(self):
+        try:
+            await asyncio.wait_for(self.transport.read(), 0.02)
+        except asyncio.TimeoutError:
+            pass
 
     def _make_query_data(self, query_resolution=None):
         if query_resolution is None:
@@ -636,6 +694,7 @@ class Controller:
             qr.q_current,
             qr.d_current,
             qr.abs_position,
+            qr.power,
             ])
         for i in range(c1.size()):
             c1.maybe_write()
@@ -882,6 +941,7 @@ class Controller:
                       velocity_limit=None,
                       accel_limit=None,
                       fixed_voltage_override=None,
+                      ilimit_scale=None,
                       query=False,
                       query_override=None):
         """Return a moteus.Command structure with data necessary to send a
@@ -903,6 +963,7 @@ class Controller:
             pr.velocity_limit if velocity_limit is not None else mp.IGNORE,
             pr.accel_limit if accel_limit is not None else mp.IGNORE,
             pr.fixed_voltage_override if fixed_voltage_override is not None else mp.IGNORE,
+            pr.ilimit_scale if ilimit_scale is not None else mp.IGNORE
         ]
 
         data_buf = io.BytesIO()
@@ -937,6 +998,8 @@ class Controller:
             writer.write_accel(accel_limit, pr.accel_limit)
         if combiner.maybe_write():
             writer.write_voltage(fixed_voltage_override, pr.fixed_voltage_override)
+        if combiner.maybe_write():
+            writer.write_voltage(ilimit_scale, pr.ilimit_scale)
 
         self._format_query(query, query_override, data_buf, result)
 
@@ -1092,6 +1155,7 @@ class Controller:
             maximum_torque=None,
             stop_position=None,
             watchdog_timeout=None,
+            ilimit_scale=None,
             query=False,
             query_override=None):
         """Return a moteus.Command structure with data necessary to send a
@@ -1109,6 +1173,7 @@ class Controller:
             pr.kd_scale if kd_scale is not None else mp.IGNORE,
             pr.maximum_torque if maximum_torque is not None else mp.IGNORE,
             pr.watchdog_timeout if watchdog_timeout is not None else mp.IGNORE,
+            pr.ilimit_scale if ilimit_scale is not None else mp.IGNORE,
         ]
 
         data_buf = io.BytesIO()
@@ -1136,6 +1201,8 @@ class Controller:
             writer.write_torque(maximum_torque, pr.maximum_torque)
         if combiner.maybe_write():
             writer.write_time(watchdog_timeout, pr.watchdog_timeout)
+        if combiner.maybe_write():
+            writer.write_pwm(ilimit_scale, pr.ilimit_scale)
 
         self._format_query(query, query_override, data_buf, result)
 
@@ -1182,8 +1249,8 @@ class Controller:
 
         combiner = mp.WriteCombiner(
             writer, 0x00, int(Register.AUX1_GPIO_COMMAND), [
-                mp.INT8 if aux1 else mp.IGNORE,
-                mp.INT8 if aux2 else mp.IGNORE,
+                mp.INT8 if aux1 is not None else mp.IGNORE,
+                mp.INT8 if aux2 is not None else mp.IGNORE,
         ])
 
         if combiner.maybe_write():
@@ -1287,6 +1354,70 @@ class Controller:
     async def set_trim(self, *args, **kwargs):
         return await self.execute(self.make_set_trim(*args, **kwargs))
 
+    def make_aux_pwm(self, *,
+                     aux1_pwm1=None,
+                     aux1_pwm2=None,
+                     aux1_pwm3=None,
+                     aux1_pwm4=None,
+                     aux1_pwm5=None,
+                     aux2_pwm1=None,
+                     aux2_pwm2=None,
+                     aux2_pwm3=None,
+                     aux2_pwm4=None,
+                     aux2_pwm5=None,
+                     query=False,
+                     query_override=None):
+        result = self._make_command(query=query, query_override=query_override)
+
+        pr = self.pwm_resolution
+        resolutions = [
+            pr.aux1_pwm1 if aux1_pwm1 is not None else mp.IGNORE,
+            pr.aux1_pwm2 if aux1_pwm2 is not None else mp.IGNORE,
+            pr.aux1_pwm3 if aux1_pwm3 is not None else mp.IGNORE,
+            pr.aux1_pwm4 if aux1_pwm4 is not None else mp.IGNORE,
+            pr.aux1_pwm5 if aux1_pwm5 is not None else mp.IGNORE,
+            pr.aux2_pwm1 if aux2_pwm1 is not None else mp.IGNORE,
+            pr.aux2_pwm2 if aux2_pwm2 is not None else mp.IGNORE,
+            pr.aux2_pwm3 if aux2_pwm3 is not None else mp.IGNORE,
+            pr.aux2_pwm4 if aux2_pwm4 is not None else mp.IGNORE,
+            pr.aux2_pwm5 if aux2_pwm5 is not None else mp.IGNORE,
+        ]
+
+        data_buf = io.BytesIO()
+        writer = Writer(data_buf)
+        combiner = mp.WriteCombiner(
+            writer, 0x00, int(Register.AUX1_PWM1), resolutions)
+
+        if combiner.maybe_write():
+            writer.write_pwm(aux1_pwm1, pr.aux1_pwm1)
+        if combiner.maybe_write():
+            writer.write_pwm(aux1_pwm2, pr.aux1_pwm2)
+        if combiner.maybe_write():
+            writer.write_pwm(aux1_pwm3, pr.aux1_pwm3)
+        if combiner.maybe_write():
+            writer.write_pwm(aux1_pwm4, pr.aux1_pwm4)
+        if combiner.maybe_write():
+            writer.write_pwm(aux1_pwm5, pr.aux1_pwm5)
+        if combiner.maybe_write():
+            writer.write_pwm(aux2_pwm1, pr.aux2_pwm1)
+        if combiner.maybe_write():
+            writer.write_pwm(aux2_pwm2, pr.aux2_pwm2)
+        if combiner.maybe_write():
+            writer.write_pwm(aux2_pwm3, pr.aux2_pwm3)
+        if combiner.maybe_write():
+            writer.write_pwm(aux2_pwm4, pr.aux2_pwm4)
+        if combiner.maybe_write():
+            writer.write_pwm(aux2_pwm5, pr.aux2_pwm5)
+
+        self._format_query(query, query_override, data_buf, result)
+
+        result.data = data_buf.getvalue()
+
+        return result
+
+    async def set_aux_pwm(self, *args, **kwargs):
+        return await self.execute(self.make_aux_pwm(*args, **kwargs))
+
     def _extract(self, value):
         if len(value):
             return value[0]
@@ -1361,11 +1492,7 @@ class Stream:
         self._read_data = b''
 
         # Now flush anything from the underlying transport if applicable.
-        try:
-            await asyncio.wait_for(self.controller._get_transport().read(), 0.02)
-        except asyncio.TimeoutError:
-            # This is the expected path.
-            pass
+        await self.controller.flush_transport()
 
     async def _read_maybe_empty_line(self):
         while b'\n' not in self._read_data and b'\r' not in self._read_data:

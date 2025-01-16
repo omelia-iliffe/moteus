@@ -150,6 +150,7 @@ functions.  Currently supported options include:
 | AS5600          | I2C              | 12 bits        | on-axis     | $         |
 | AksIM-2         | RS422 w/ 5V      | 20 bits        | off-axis    | $$$       |
 | CUI AMT21x      | RS422 w/ 5V      | 14 bits        | shaft       | $$        |
+| MA600           | SPI              | 16 bits        | on/off-axis | $         |
 | MA732           | SPI              | 14 bits        | on/off-axis | $         |
 | iC-PZ           | SPI w/ 5V        | 22 bits        | off-axis    | $$$       |
 | Quadrature      | Quadrature       | N/A            | x           | x         |
@@ -173,11 +174,11 @@ used for various functions.
 
 ELECTRICAL NOTES:
  * The 3.3V supply pins can power external peripherals:
-   * r4.5: 50mA
+   * r4.5/c1: 50mA
    * r4.8/r4.11/n1: 100mA
  * The 5V supply pins can power external peripherals:
    * r4: not present
-   * n1: 100mA
+   * n1/c1: 100mA
  * Some pins are 5V tolerant.  Those not marked as such in the pin
    option table are 3.3V only.
 
@@ -274,50 +275,54 @@ The following table shows which pins can be used for the unique capabilities:
 
 #### AUX1 / ENC ####
 
-| moteus r4.5/8/11 | Con | Aux | SPI  | ADC/Sin/Cos | I2C | HW Quad | UART | 5VT |
-|------------------|-----|-----|------|-------------|-----|---------|------|-----|
-| 3.3V  (3)        | 1   |     |      |             |     |         |      |     |
-| C                | 2   | 0   | X    |             |     |         |      | X   |
-| GND (G)          | 3   |     |      |             |     |         |      |     |
-| K                | 4   | 1   | CLK  | X           |     |         |      |     |
-| I                | 5   | 2   | MISO | X           |     |         |      |     |
-| O                | 6   | 3   | MOSI | X           |     |         |      |     |
+| moteus r4.5/8/11 | Con | Aux | SPI  | ADC/Sin/Cos | I2C | HW Quad/PWM | UART | 5VT |
+|------------------|-----|-----|------|-------------|-----|-------------|------|-----|
+| 3.3V  (3)        | 1   |     |      |             |     |             |      |     |
+| C                | 2   | 0   | X    |             |     |             |      | X   |
+| GND (G)          | 3   |     |      |             |     |             |      |     |
+| K                | 4   | 1   | CLK  | X           |     |             |      |     |
+| I                | 5   | 2   | MISO | X           |     |             |      |     |
+| O                | 6   | 3   | MOSI | X           |     |             |      |     |
 
-| moteus n1        | Con | AUX | SPI  | ADC/Sin/Cos | I2C | HW Quad | UART | 5VT |
-|------------------|-----|-----|------|-------------|-----|---------|------|-----|
-| 5V (5)           | 1   |     |      |             |     |         |      |     |
-| 3.3V (3)         | 2   |     |      |             |     |         |      |     |
-| A                | 3   | 0   | CLK  | X           |     |         |      |     |
-| B *              | 4   | 1   | MISO |             |     | 3.1     | RX   |     |
-| C                | 5   | 2   | MOSI | X           |     | 3.2     |      |     |
-| D                | 6   | 3   |      |             | SCL | 2.1     | RX   | X   |
-| E                | 7   | 4   |      |             | SDA | 2.2     | TX   | X   |
-| GND (G)          | 8   |     |      |             |     |         |      |     |
+| moteus n1/c1     | Con | AUX | SPI  | ADC/Sin/Cos | I2C | HW Quad/PWM | UART | 5VT |
+|------------------|-----|-----|------|-------------|-----|-------------|------|-----|
+| 5V (5)           | 1   |     |      |             |     |             |      |     |
+| 3.3V (3)         | 2   |     |      |             |     |             |      |     |
+| A                | 3   | 0   | CLK  | X           |     |             |      |     |
+| B *              | 4   | 1   | MISO |             |     | 3.1         | RX   |     |
+| C                | 5   | 2   | MOSI | X           |     | 3.2         |      |     |
+| D                | 6   | 3   |      |             | SCL | 2.1         | RX   | X   |
+| E                | 7   | 4   |      |             | SDA | 2.2         | TX   | X   |
+| GND (G)          | 8   |     |      |             |     |             |      |     |
 
 NOTE: For moteus n1, the B pin software configured pullup cannot be
 used effectively.  Thus the B pin is unsuitable for open-drain inputs
 like hall effect sensors unless external pullups are provided.
 
+NOTE: For moteus c1, only the D and E pins are exposed, and only on an
+unpopulated 0.05" through hole land pattern.  Additionally, I2C
+pullups are not available on moteus-c1 for aux1.
+
 #### AUX2 / ABS ####
 
-| moteus r4.5/8/11 | Con | Aux | SPI  | ADC/Sin/Cos | I2C | HW Quad | UART | 5VT |
-|------------------|-----|-----|------|-------------|-----|---------|------|-----|
-| 3.3V (3)         | 1   |     |      |             |     |         |      |     |
-|                  | 2   | 0   |      |             | SCL |         | RX   | X   |
-|                  | 3   | 1   |      |             | SDA |         | TX   | X   |
-| GND (G)          | 4   |     |      |             |     |         |      |     |
-| DBG 1            |     | 2   |      |             |     |         |      | X   |
-| DBG 2            |     | 3   |      |             |     |         |      | X   |
+| moteus r4.5/8/11 | Con | Aux | SPI  | ADC/Sin/Cos | I2C | HW Quad/PWM | UART | 5VT |
+|------------------|-----|-----|------|-------------|-----|-------------|------|-----|
+| 3.3V (3)         | 1   |     |      |             |     |             |      |     |
+|                  | 2   | 0   |      |             | SCL |             | RX   | X   |
+|                  | 3   | 1   |      |             | SDA |             | TX   | X   |
+| GND (G)          | 4   |     |      |             |     |             |      |     |
+| DBG 1            |     | 2   |      |             |     |             |      | X   |
+| DBG 2            |     | 3   |      |             |     |             |      | X   |
 
-| moteus n1        | Con | AUX | SPI  | ADC/Sin/Cos | I2C | HW Quad | UART | 5VT |
-|------------------|-----|-----|------|-------------|-----|---------|------|-----|
-| 5V (5)           | 1   |     |      |             |     |         |      |     |
-| 3.3V (3)         | 2   |     |      |             |     |         |      |     |
-| A                | 3   | 0   | CLK  | X           |     |         |      | X   |
-| B                | 4   | 1   | MISO | X           | SDA |         | RX   | X   |
-| C                | 5   | 2   | MOSI | X           | SCL | 4.1     | TX   | X   |
-| D                | 6   | 3   |      |             |     | 4.2     | RX   | X   |
-| GND (G)          | 7   |     |      |             |     |         |      |     |
+| moteus n1/c1     | Con | AUX | SPI  | ADC/Sin/Cos | I2C | HW Quad/PWM | UART | 5VT |
+|------------------|-----|-----|------|-------------|-----|-------------|------|-----|
+| 5V (5)           | 1   |     |      |             |     |             |      |     |
+| 3.3V (3)         | 2   |     |      |             |     |             |      |     |
+| A                | 3   | 0   | CLK  | X           |     |             |      | X   |
+| B                | 4   | 1   | MISO | X           | SDA |             | RX   | X   |
+| C                | 5   | 2   | MOSI | X           | SCL | 4.1         | TX   | X   |
+| D                | 6   | 3   |      |             |     | 4.2         | RX   | X   |
+| GND (G)          | 7   |     |      |             |     |             |      |     |
 
 NOTE: For moteus r4.5/8/11, DBG 1/2 are not present on the ABS
 connector, but are exposed pads on the circuit board.
@@ -402,7 +407,9 @@ index source configured from a homing switch.
 Finally, `motor_position.rotor_to_output_ratio` defines the number of
 turns of the output for one turn of the rotor.  This is used to map
 the readings from sensors that are defined relative to one into the
-other.
+other.  For gear reducers (almost all configurations), this will be
+less than one.  For example, a 4x gear reduction would be entered as
+0.25.
 
 # A. register command set #
 
@@ -563,6 +570,12 @@ values.
 - int16 => 1 LSB => (1/32767) - 0.000030519
 - int32 => 1 LSB => (1/2147483647) - 4.657e-10
 
+#### A.2.a.10 Power (W) ####
+
+- int8 => 1 LSB => 10.0 W
+- int16 => 1 LSB => 0.05 W
+- int32 => 1 LSB => 0.0001 W
+
 ### A.2.b Registers ###
 
 #### 0x000 - Mode ####
@@ -629,13 +642,21 @@ Mode: Read only
 If an absolute encoder is configured on the ABS port, its value will
 be reported here in revolutions.
 
-#### 0x00a - Motor Temperature ####
+#### 0x007 - Measured electrical power ####
+
+Mode: Read only
+
+The estimated electrical power applied to the motor if positive.  If
+negative, power applied to the DC input bus.
+
+#### 0x00a - Motor temperature ####
 
 Mode: Read only
 
 The current motor temperature, measured in degrees celsius.  This will
-only be valid if a 47k NTC thermistor is connected to the TEMP pads
-and `servo.enable_motor_temperature` is set to 1.
+only be valid if an NTC thermistor is connected to the TEMP pads,
+`motor.thermistor_ohm` is set to the correct resistance, and
+`servo.enable_motor_temperature` is set to 1.
 
 #### 0x00b - Trajectory complete ####
 
@@ -698,23 +719,31 @@ A fault code which will be set if the primary mode is 1 (Fault).
   operation that requires a stop
 * 42 - *theta invalid* - no valid commutation encoder is available
 * 43 - *position invalid* - no valid output encoder is available
-* 44 - *stop position deprecated* - an attempt was made to use the
+* 44 - *driver enable fault* - the MOSFET gate driver could not be
+  enabled
+* 45 - *stop position deprecated* - an attempt was made to use the
   deprecated "stop position" feature along with velocity or
   acceleration limits.  Prefer to instead command the desired position
   directly with a target velocity of 0.0, or secondarily, disable
   acceleration and velocity limits.
+* 46 - *timing violation* - internal checks are enabled, and the
+  controller violated an internal timing constraint
+* 47 - *bemf feedforward no accel* - `servo.bemf_feedforward` is
+  configured, but no acceleration limit was specified.  If you
+  *really* know what you are doing, you can disable this with
+  `servo.bemf_feedforward_override`.
 
 The full list can be found at: [fw/error.h](../fw/error.h#L25)
 
 
-### 0x010 / 0x011 / 0x012 - PWM phase A / B / C ###
+#### 0x010 / 0x011 / 0x012 - PWM phase A / B / C ####
 
 Mode: Read/write
 
 When in Pwm mode, this controls the raw PWM value for phase A, B, and
 C.  If unspecified, 0.0 is used.
 
-### 0x014 / 0x15 / 0x16 - Voltage phase A / B / C ###
+#### 0x014 / 0x15 / 0x16 - Voltage phase A / B / C ####
 
 Mode: Read/write
 
@@ -722,42 +751,42 @@ When in Voltage mode, this controls the voltage applied to phase A,
 B, and C.  If unspecified, 0.0 is used.
 
 
-### 0x018 - Voltage FOC Theta ###
+#### 0x018 - Voltage FOC Theta ####
 
 Mode: Read/write
 
 When in Voltage Foc mode, this controls the desired electrical phase.
 Integral types use the PWM mapping.  If unspecified, 0.0 is used.
 
-### 0x019 - Voltage FOC Voltage ###
+#### 0x019 - Voltage FOC Voltage ####
 
 Mode: Read/write
 
 When in Voltage Foc mode, this controls the desired applied phase
 voltage.  If unspecified, 0.0 is used.
 
-### 0x01a - D Voltage ###
+#### 0x01a - D Voltage ####
 
 Mode: Read/write
 
 When in Voltage Dq mode, this controls the desired applied D voltage.
 If unspecified, 0.0 is used.
 
-### 0x01b - Q Voltage ###
+#### 0x01b - Q Voltage ####
 
 Mode: Read/write
 
 When in kVoltageDq mode, this controls the desired applied Q voltage.
 If unspecified, 0.0 is used.
 
-### 0x01c - Commanded Q Phase Current ###
+#### 0x01c - Commanded Q Phase Current ####
 
 Mode: Read/write
 
 When in Current mode, this controls the desired Q phase current.  If
 unspecified, 0.0 is used.
 
-### 0x01d - Commanded D Phase Current ###
+#### 0x01d - Commanded D Phase Current ####
 
 Mode: Read/write
 
@@ -765,7 +794,7 @@ When in Current mode, this controls the desired D phase current.  Unless
 you like burning power, with a BLDC motor you will typically want this
 set to 0.  If unspecified, 0.0 is used.
 
-### 0x1e - Voltage FOC Theta Rate ###
+#### 0x1e - Voltage FOC Theta Rate ####
 
 Mode: Read/write
 
@@ -860,17 +889,24 @@ negative means apply no enforced timeout.
 Mode: Read/write
 
 This can be used to override the global velocity limit for internally
-generated trajectories.  If unspecified, it is NaN / maximally
-negative, which implies to use the global configurable default.
+generated trajectories.
+
+If negative, then no limit is applied.
+
+If unspecified, it is NaN / maximally negative, which implies to use
+the global configurable default.
 
 #### 0x029 - Acceleration limit ####
 
 Mode: Read/write
 
 This can be used to override the global acceleration limit for
-internally generated trajectories.  If unspecified, it is NaN /
-maximally negative, which implies to use the global configurable
-default.
+internally generated trajectories.
+
+If negative, then no limit is applied.
+
+If unspecified, it is NaN / maximally negative, which implies to use
+the global configurable default.
 
 #### 0x02a - Fixed voltage override ####
 
@@ -880,41 +916,49 @@ If specified and not-NaN, then the control mode will temporarily be in
 the "fixed voltage" mode, regardless of the current setting of
 `servo.fixed_voltage_mode`.
 
-### 0x030 - Proportional torque ###
+#### 0x02b - Ki ilimit scale ####
+
+Mode: Read/write
+
+When in Position mode, shrink the integral term's windup limit by the
+given factor.  Integral types are applied as for PWM.  If unspecified,
+1.0 is used.
+
+#### 0x030 - Proportional torque ####
 
 Mode: Read
 
 This reports the torque contribution from the proportional term in the
 PID controller.
 
-### 0x031 - Integral torque ###
+#### 0x031 - Integral torque ####
 
 Mode: Read
 
 This reports the torque contribution from the integral term in the
 PID controller.
 
-### 0x032 - Derivative torque ###
+#### 0x032 - Derivative torque ####
 
 Mode: Read
 
 This reports the torque contribution from the derivative term in the
 PID controller.
 
-### 0x033 - Feedforward torque ###
+#### 0x033 - Feedforward torque ####
 
 Mode: Read
 
 This reports the feedforward contribution in the PID controller.
 
-### 0x034 - Total control torque ###
+#### 0x034 - Total control torque ####
 
 Mode: Read
 
 This reports the total commanded torque from the position mode
 controller.  This is also reported in 0x03a.
 
-### 0x038 - Control Position ###
+#### 0x038 - Control Position ####
 
 Mode: Read
 
@@ -923,7 +967,7 @@ that is valid.  When velocity or acceleration limiting is enabled, the
 control position will follow the desired limits to achieve the command
 position.
 
-### 0x039 - Control Velocity ###
+#### 0x039 - Control Velocity ####
 
 Mode: Read
 
@@ -932,32 +976,32 @@ is valid.  When velocity or acceleration limiting is enabled, the
 control velocity will follow the desired limits to achieve the control
 position and velocity.
 
-### 0x03a - Control Torque ###
+#### 0x03a - Control Torque ####
 
 Mode: Read
 
 The torque commanded by the control loop.  This is the same as 0x034.
 
-### 0x03b - Position Error ###
+#### 0x03b - Position Error ####
 
 Mode: Read
 
 The current sensed position minus the control position.
 
-### 0x03c - Velocity Error ###
+#### 0x03c - Velocity Error ####
 
 Mode: Read
 
 The current sensed velocity minus the control velocity.
 
-### 0x03d - Torque Error ###
+#### 0x03d - Torque Error ####
 
 Mode: Read
 
 The current sensed torque minus the control torque.
 
 
-### 0x040 - Stay within lower bound ###
+#### 0x040 - Stay within lower bound ####
 
 Mode: Read/write
 
@@ -969,7 +1013,7 @@ feedforward torque is applied.  When outside this bound, the PID
 controller is used to force the position back to the bound.  If
 unspecified, 0.0 is used.
 
-### 0x041 - Stay within upper bound ###
+#### 0x041 - Stay within upper bound ####
 
 Mode: Read/write
 
@@ -981,76 +1025,80 @@ a feedforward torque is applied.  When outside this bound, the PID
 controller is used to force the position back to the bound.  If
 unspecified, 0.0 is used.
 
-### 0x042 - Feedforward torque ###
+#### 0x042 - Feedforward torque ####
 
 A shadow of the 0x022 register.
 
-### 0x043 - Kp scale ###
+#### 0x043 - Kp scale ####
 
 A shadow of the 0x023 register.
 
-### 0x044 - Kd scale ###
+#### 0x044 - Kd scale ####
 
 A shadow of the 0x024 register.
 
-### 0x045 - Maximum torque ###
+#### 0x045 - Maximum torque ####
 
 A shadow of the 0x025 register.
 
-### 0x046 - Watchdog timeout ###
+#### 0x046 - Watchdog timeout ####
 
 A shadow of the 0x027 register.
 
-### 0x050 - Encoder 0 Position ###
+#### 0x047 - Ki ilimit scale ####
+
+A shadow of the 0x02b register.
+
+#### 0x050 - Encoder 0 Position ####
 
 Mode: Read only
 
 Reports the current filtered position of the encoder configured in
 slot 0.
 
-### 0x051 - Encoder 0 Velocity ###
+#### 0x051 - Encoder 0 Velocity ####
 
 Mode: Read only
 
 Reports the current filtered velocity of the encoder configured in
 slot 0.
 
-### 0x052 - Encoder 1 Position ###
+#### 0x052 - Encoder 1 Position ####
 
 Mode: Read only
 
 Reports the current filtered position of the encoder configured in
 slot 1.
 
-### 0x053 - Encoder 1 Velocity ###
+#### 0x053 - Encoder 1 Velocity ####
 
 Mode: Read only
 
 Reports the current filtered velocity of the encoder configured in
 slot 1.
 
-### 0x054 - Encoder 2 Position ###
+#### 0x054 - Encoder 2 Position ####
 
 Mode: Read only
 
 Reports the current filtered position of the encoder configured in
 slot 2.
 
-### 0x055 - Encoder 2 Velocity ###
+#### 0x055 - Encoder 2 Velocity ####
 
 Mode: Read only
 
 Reports the current filtered velocity of the encoder configured in
 slot 2.
 
-### 0x058 - Encoder Validity ###
+#### 0x058 - Encoder Validity ####
 
 Mode: Read only
 
 Returns a bitfield, where bit 0 indicates whether encoder 0 is active,
 bit 1 indicates whether encoder 1 is active, etc.
 
-### 0x05c - Aux1 GPIO Command ###
+#### 0x05c - Aux1 GPIO Command ####
 
 Mode: Read/write
 
@@ -1058,7 +1106,7 @@ The current output command for any GPIOs configured as an output on
 aux1 as a bitfield.  Not all bits may be used, as bit 0 is always for
 pin 1, whether or not it is configured as a GPIO output.
 
-### 0x05d - Aux2 GPIO Command ###
+#### 0x05d - Aux2 GPIO Command ####
 
 Mode: Read/write
 
@@ -1066,7 +1114,7 @@ The current output command for any GPIOs configured as an output on
 aux2 as a bitfield.  Not all bits may be used, as bit 0 is always for
 pin 1, whether or not it is configured as a GPIO output.
 
-### 0x05e - Aux1 GPIO Status ###
+#### 0x05e - Aux1 GPIO Status ####
 
 Mode: Read only
 
@@ -1074,7 +1122,7 @@ The current input value of any GPIOs configured as an input on aux1 as
 a bitfield.  Not all bits may be used, as bit 0 is always for pin 1,
 whether or not it is configured as a GPIO input.
 
-### 0x05f - Aux2 GPIO Status ###
+#### 0x05f - Aux2 GPIO Status ####
 
 Mode: Read only
 
@@ -1082,7 +1130,7 @@ The current input value of any GPIOs configured as an input on aux2 as
 a bitfield.  Not all bits may be used, as bit 0 is always for pin 1,
 whether or not it is configured as a GPIO input.
 
-### 0x060/0x064 - Aux1 Analog Inputs ###
+#### 0x060/0x064 - Aux1 Analog Inputs ####
 
 Mode: Read only
 
@@ -1091,7 +1139,7 @@ registers are associated with pins 1-5, regardless of whether they are
 configured as an analog input.  Each value is scaled as a PWM from 0
 to 1.
 
-### 0x068/0x06c - Aux2 Analog Inputs ###
+#### 0x068/0x06c - Aux2 Analog Inputs ####
 
 Mode: Read only
 
@@ -1100,7 +1148,7 @@ registers are associated with pins 1-5, regardless of whether they are
 configured as an analog input.  Each value is scaled as a PWM from 0
 to 1.
 
-### 0x070 - Millisecond Counter ###
+#### 0x070 - Millisecond Counter ####
 
 Mode: Read only
 
@@ -1108,7 +1156,7 @@ Increments once per millisecond.  It wraps at the maximum value for
 the queried type to the minimum value for that type.  For floating
 point types, it counts integers from 0 to 8388608.
 
-### 0x071 - Clock Trim ###
+#### 0x071 - Clock Trim ####
 
 Mode: Read/write
 
@@ -1121,15 +1169,28 @@ WARNING: Changing the speed affects all processes driven by the
 microcontroller, including CAN communication.  Thus setting this to a
 non-zero value may prevent future CAN communications.
 
+#### 0x076/0x07a - Aux1 PWM Outputs ####
 
-### 0x100 - Model Number ###
+Mode: Read/write
+
+The current output PWM value for the given pin on Aux1.  PWM mapping
+is used for integral types.
+
+#### 0x07b/0x07f - Aux2 PWM Outputs ####
+
+Mode: Read/write
+
+The current output PWM value for the given pin on Aux1.  PWM mapping
+is used for integral types.
+
+#### 0x100 - Model Number ####
 
 Name: Model Number
 Mode: Read only
 
 This returns a 32 bit model number.
 
-### 0x101 - Firmware Version ###
+#### 0x101 - Firmware Version ####
 
 Mode: Read only
 
@@ -1137,14 +1198,14 @@ This returns a 32 bit firmware version, encoded bytewise as
 major.minor.micro.  i.e. 0x010304 is version 1.3.4
 
 
-### 0x102 - Register map version ###
+#### 0x102 - Register map version ####
 
 Mode: Read only
 
 This returns a number that indicates how to interpret all registers.
 
 
-### 0x110 - Multiplex ID ###
+#### 0x110 - Multiplex ID ####
 
 Name: Multiplex ID
 Mode: Configurable
@@ -1153,7 +1214,7 @@ This controls the primary ID used to access the device over the
 multiplex RS485 bus.  It can only be between 1 and 127.  (0 is
 reserved as the broadcast address).
 
-### 0x120 - 0x122 - Serial Number ###
+#### 0x120 - 0x122 - Serial Number ####
 
 Name: Serial Number
 Mode: Read only
@@ -1161,7 +1222,7 @@ Mode: Read only
 This returns a 96 bit serial number, least significant word first.
 
 
-### 0x130 - Set Output Nearest ###
+#### 0x130 - Set Output Nearest ####
 
 Mode: Write only
 
@@ -1169,14 +1230,14 @@ When sent, this causes the servo to select a whole number of internal
 motor rotations so that the final position is as close to the given
 position as possible.
 
-### 0x131 - Set Output Exact ###
+#### 0x131 - Set Output Exact ####
 
 Mode: Write only
 
 When sent, the servo will force the output position to be the exact
 specified value.
 
-### 0x132 - Require Reindex ###
+#### 0x132 - Require Reindex ####
 
 Mode: Write only
 
@@ -1185,7 +1246,7 @@ position be re-located before control can begin.  Regardless, the
 position will reset to an arbitrary value consistent with the current
 encoder settings.
 
-### 0x133 - Recapture Position and Velocity ###
+#### 0x133 - Recapture Position and Velocity ####
 
 Mode: Write only
 
@@ -1197,7 +1258,7 @@ current applied torque is 0, either because of an in-place maximum
 torque limit of zero, or because of an in-place kp and kd scale of
 zero.
 
-### 0x140 - Driver Fault 1 ###
+#### 0x140 - Driver Fault 1 ####
 
 Mode: Read only
 
@@ -1206,7 +1267,7 @@ for fault register 1.  Up to 16 bits may be set.  This will only be
 non-zero if the current mode is fault (1) and the fault code is 33
 (motor driver fault).
 
-### 0x141 - Driver Fault 2 ###
+#### 0x141 - Driver Fault 2 ####
 
 Mode: Read only.
 
@@ -1214,6 +1275,23 @@ The exact bitfield reported by the motor driver in fault conditions
 for fault register 2.  Up to 16 bits may be set.  This will only be
 non-zero if the current mode is fault (1) and the fault code is 33
 (motor driver fault).
+
+#### 0x150 - 0x153 - UUID ####
+
+Name: UUID
+Mode: Read only, int32 only
+
+This returns a 128 bit UUID, this is the value printed on mjbots
+packaging and returned by `moteus_tool --info`
+
+#### 0x154 - 0x157 - UUID Mask ####
+
+Name: UUID
+Mode: Write only, int32 only
+
+If one or more of these fields are written, then the entire frame
+after this point will be discarded unless the devices corresponding
+UUID matches what was written.
 
 ## A.3 Example ##
 
@@ -1330,6 +1408,8 @@ Each optional element consists of a prefix character followed by a value.  Permi
   constant for the duration of this command
 - `d` - kd scale: the configured kd value is multiplied by this
   constant for the duration of this command
+- `i` - ki ilimit scale: the configured ilimit value is multiplied by
+  this constant for the duration of this command
 - `s` - stop position: when a non-zero velocity is given, motion stops
   when the control position reaches this value.
 - `f` - feedforward torque in Nm
@@ -1474,6 +1554,17 @@ aux1 out <data>
 
 'data' is a single decimal integer.  Only bits associated with pins
 configured as digital outputs are used, the remainder are ignored.
+
+### `aux1 pwm` - Set PWM Output Values ###
+
+```
+aux1 pwm <pin> <value>
+```
+
+'pin' is a number from 0 to 4 that gives the pin to set.
+
+'value' is a floating point value between 0.0 and 1.0 that gives the
+output duty cycle for the pin.
 
 ### `aux1 ic-cmd` - Initiate an iC-PZ command ###
 
@@ -1904,6 +1995,11 @@ For mode 10, `servo.default_velocity_limit` and
 profile to zero speed.  The default PID gains are used.  The only
 limit on torque when in this timeout mode is `servo.max_current_A`.
 
+## `motor.thermistor_ohm` ##
+
+The resistance of any attached motor NTC thermistor as measured at 25C
+in ohms.
+
 ## `aux[12].pins.X.mode` ##
 
 Selects what functionality will be used on the given pin.
@@ -1925,6 +2021,7 @@ Selects what functionality will be used on the given pin.
 * 14 - Digital input
 * 15 - Digital output (not implemented)
 * 16 - Analog input
+* 17 - PWM output
 
 ## `aux[12].pins.X.pull` ##
 
@@ -1974,6 +2071,7 @@ The type of SPI device.
 * 2 - AS5047P (CPR == 16384)
 * 3 - iC-PZ
 * 4 - MA732 (CPR == 65536)
+* 5 - MA600 (CPR == 65536)
 
 NOTE: iC-PZ devices require significant configuration and calibration
 before use.  Diagnostic mode commands are provided for low level
@@ -2050,6 +2148,16 @@ The common mode voltage to use for the sine cosine.  The sampling is
 done with 12 bits, so 2048 would be exactly 0.5 * 3.3V.  However, it
 is best to calibrate this with actual readings as observed over the
 diagnostic protocol for optimal performance.
+
+## `aux[12].i2c_startup_delay_ms` ##
+
+A delay in milliseconds after power-on (or upon reconfiguring), before
+I2C devices associated with this auxiliary port are first used.
+
+## `aux[12].pwm_period_us` ##
+
+The period in microseconds to be used for PWM outputs on this
+auxiliary port.
 
 ## `motor_position.sources.X.aux_number` ##
 
@@ -2143,6 +2251,16 @@ position for multi-turn scenarios or when a reducer is configured.
 ## `motor_position.rotor_to_output_ratio` ##
 
 The number of times the output turns for each revolution of the rotor.
+For gear reducers (almost all configurations), this will be less than
+one.  For example, a 4x gear reduction would be entered as 0.25.
+
+## `motor_position.rotor_to_output_override` ##
+
+If you *REALLY* know what you are doing, and want to configure a
+non-reducing ratio, this can be set to true/non-zero.  Otherwise, a
+ratio of greater than 1.0 will cause a fault.  This should only be
+used if the system has a gearbox which is not a reducer, but speeds up
+the output.
 
 
 # D. Maintenance #
@@ -2193,6 +2311,25 @@ d pos nan 0.5 1 s0.5 && :1000 && d stop
 
 Will command a position mode, wait 1s, then command a stop.
 
+### Waiting for a trajectory to complete ###
+
+A sequence of commands can be paused until a controller has finished
+its trajectory using the `?` character.
+
+```
+d pos 0 0 nan a2 && ? && d pos 1 0 nan a2
+```
+
+Will move to position 0, wait until that motion is complete, then move
+to position 1, all with an acceleration limit of 2.
+
+Specific devices can be queried by following the question mark with an
+ID number.
+
+```
+2>d pos 0 0 nan a2 && 1>d pos 10 0 0 nan a2 && ?2 && 2>d stop
+```
+
 ## Calibration ##
 
 Assuming your controller has firmware installed already, you can
@@ -2219,8 +2356,8 @@ python3 -m moteus.moteus_tool --target 1 --zero-offset
 
 ## Flashing and building firmware ##
 
-To build the moteus firmware, an x86-64 Ubuntu 20.04 or 22.04 system
-is required.
+To build the moteus firmware, an x86-64 Ubuntu 20.04, 22.04, or 24.04
+system is required.
 
 ### Flashing over CAN ###
 
@@ -2349,7 +2486,7 @@ RS422, configured by AUX1 D/E to USART and enabling RS422 on AUX1.
  - 7 - E
  - 8 - GND
 
-### moteus n1 - AUX2 - JST GH-7 ###
+### moteus n1/c1 - AUX2 - JST GH-7 ###
 
  - 1 - 5V
  - 2 - 3.3V
@@ -2365,7 +2502,7 @@ Looking at the pins of the power connector with the top of the board
 up, the ground pin is to the left with the chamfered corner and the
 positive supply is to the right with the square corner.
 
-### Pico-SPOX 6 ENC ###
+### moteus-r4 - Pico-SPOX 6 ENC ###
 
 Looking at the back of the board with the ENC connector at the top,
 pins are numbered 1 as the rightmost, and 6 as the leftmost.
@@ -2416,10 +2553,25 @@ can be resolved by specifying custom bit timings to the linux
 socketcan subsystem.  The following timings are known to work for at
 least some systems:
 
+### 20MHz clock systems ###
+
+Some rare MCP2517/8 adapters have a 20MHz clock rate.  The following
+timings have been observed to work.  Note, that with 20MHz adapters,
+BRS cannot be used (so for tview/moteus_tool, specify
+`--can-disable-brs`).
+
+```
+ip link set can0 up type can \
+  bitrate 1000000 dbitrate 5000000 \
+  sjw 2 dsjw 2 \
+  sample-point 0.666 dsample-point 0.666 \
+  restart-ms 1000 fd on
+```
+
 ### 40MHz clock systems ###
 
-Chips such as the MCP2517/8 often use a 40MHz system clock.  The
-following timings have been observed to work:
+More commonly, chips such as the MCP2517/8 use a 40MHz system clock.
+The following timings have been observed to work:
 
 ```
 ip link set can0 up type can \

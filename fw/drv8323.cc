@@ -38,7 +38,8 @@ class Drv8323::Impl {
   Impl(micro::PersistentConfig* config,
        micro::TelemetryManager* telemetry_manager,
        MillisecondTimer* timer,
-       const Options& options)
+       const Options& options,
+       Stm32DigitalOutput* hiz)
       : timer_(timer),
         spi_(
             timer,
@@ -61,7 +62,7 @@ class Drv8323::Impl {
               return out;
             }()),
         enable_(options.enable, 0),
-        hiz_(options.hiz, 0),
+        hiz_(hiz),
         fault_(options.fault, PullUp) {
     // We need to enable the built-in pullup on the MISO pin, but
     // mbed's SPI class provides no mechanism to do that. :( Thus we
@@ -123,10 +124,6 @@ class Drv8323::Impl {
     return enable_state_;
   }
 
-  void Power(bool value) {
-    hiz_.write(value ? 1 : 0);
-  }
-
   uint16_t Read(int reg) {
     const uint16_t result = spi_.write(0x8000 | (reg << 11)) & 0x7ff;
     timer_->wait_us(1);
@@ -147,7 +144,7 @@ class Drv8323::Impl {
     auto& s = status_;
 
     s.fault_line = fault_.read() == 0;
-    s.power = (hiz_.read() != 0);
+    s.power = (hiz_->read() != 0);
     s.enabled = enable_state_ != kDisabled;
 
     if (enable_state_ != kEnabled) {
@@ -258,7 +255,8 @@ class Drv8323::Impl {
     };
 
     const bool drv8323 =
-        (g_measured_hw_family == 0 && g_measured_hw_rev <= 6);
+        (g_measured_hw_family == 0 && g_measured_hw_rev <= 6) ||
+        (g_measured_hw_family == 1);
 
     constexpr uint16_t idrivep_table_drv8323[] = {
       10, 30, 60, 80, 120, 140, 170, 190,
@@ -400,8 +398,8 @@ class Drv8323::Impl {
   Config config_;
 
   Stm32BitbangSpi spi_;
-  DigitalOut enable_;
-  DigitalOut hiz_;
+  Stm32DigitalOutput enable_;
+  Stm32DigitalOutput* const hiz_;
   DigitalIn fault_;
 
   uint16_t loop_count_ = 0;
@@ -416,7 +414,8 @@ Drv8323::Drv8323(micro::Pool* pool,
                  micro::TelemetryManager* telemetry_manager,
                  MillisecondTimer* timer,
                  const Options& options)
-    : impl_(pool, persistent_config, telemetry_manager, timer, options) {}
+    : impl_(pool, persistent_config, telemetry_manager, timer, options, &hiz_),
+      hiz_(options.hiz, 0) {}
 
 Drv8323::~Drv8323() {}
 
@@ -424,17 +423,22 @@ MotorDriver::EnableResult Drv8323::StartEnable(bool value) {
   return impl_->StartEnable(value);
 }
 
-void Drv8323::Power(bool value) { impl_->Power(value); }
-
 bool Drv8323::fault() {
-  return impl_->status_.fault_config ||
-      ((impl_->enable_state_ == kEnabled) &&
-       ((g_measured_hw_family == 0 && g_measured_hw_rev == 3) ?
-        // This revision seems to be unable to read the fault line
-        // properly.  Thus we get a laggier version over SPI.
-        (impl_->status_.fault == 1) :
-        (impl_->fault_.read() == 0))
-       );
+  const bool check_fault_config = !!impl_->status_.fault_config;
+  if (check_fault_config) { return true; }
+
+  const bool check_enable = impl_->enable_state_ == MotorDriver::kEnabled;
+  if (!check_enable) { return false; }
+
+  const bool check_family0_rev3 =
+      (g_measured_hw_family == 0 && g_measured_hw_rev == 3);
+  if (check_family0_rev3) {
+    const bool check_spi_fault = impl_->status_.fault == 1;
+    return check_spi_fault;
+  } else {
+    const bool check_hw_fault =impl_->fault_.read() == 0;
+    return check_hw_fault;
+  }
 }
 
 void Drv8323::PollMillisecond() { impl_->PollMillisecond(); }

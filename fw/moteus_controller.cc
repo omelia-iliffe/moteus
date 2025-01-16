@@ -122,10 +122,20 @@ Value ScaleTime(float value, size_t type) {
   return ScaleMapping(value, 0.01f, 0.001f, 0.000001f, type);
 }
 
+Value ScalePower(float value, size_t type) {
+  return ScaleMapping(value, 10.0f, 0.05f, 0.0001f, type);
+}
+
 int8_t ReadIntMapping(Value value) {
   return std::visit([](auto a) {
-      return static_cast<int8_t>(a);
-    }, value);
+    return static_cast<int8_t>(a);
+  }, value);
+}
+
+int32_t ReadInt32Mapping(Value value) {
+  return std::visit([](auto a) {
+    return static_cast<int32_t>(a);
+  }, value);
 }
 
 struct ValueScaler {
@@ -217,6 +227,7 @@ enum class Register {
   kQCurrent = 0x004,
   kDCurrent = 0x005,
   kAbsPosition = 0x006,
+  kPower = 0x007,
 
   kMotorTemperature = 0x00a,
   kTrajectoryComplete = 0x00b,
@@ -254,6 +265,7 @@ enum class Register {
   kCommandVelocityLimit = 0x028,
   kCommandAccelLimit = 0x029,
   kCommandFixedVoltageOverride = 0x02a,
+  kCommandIlimitScale = 0x02b,
 
   kPositionKp = 0x030,
   kPositionKi = 0x031,
@@ -275,6 +287,7 @@ enum class Register {
   kStayWithinKdScale = 0x044,
   kStayWithinMaxTorque = 0x045,
   kStayWithinTimeout = 0x046,
+  kStayWithinIlimitScale = 0x047,
 
   kEncoder0Position = 0x050,
   kEncoder0Velocity = 0x051,
@@ -307,6 +320,17 @@ enum class Register {
   kMillisecondCounter = 0x070,
   kClockTrim = 0x071,
 
+  kAux1Pwm1 = 0x076,
+  kAux1Pwm2 = 0x077,
+  kAux1Pwm3 = 0x078,
+  kAux1Pwm4 = 0x079,
+  kAux1Pwm5 = 0x07a,
+  kAux2Pwm1 = 0x07b,
+  kAux2Pwm2 = 0x07c,
+  kAux2Pwm3 = 0x07d,
+  kAux2Pwm4 = 0x07e,
+  kAux2Pwm5 = 0x07f,
+
   kModelNumber = 0x100,
   kFirmwareVersion = 0x101,
   kRegisterMapVersion = 0x102,
@@ -323,6 +347,16 @@ enum class Register {
 
   kDriverFault1 = 0x140,
   kDriverFault2 = 0x141,
+
+  kUuid1 = 0x150,
+  kUuid2 = 0x151,
+  kUuid3 = 0x152,
+  kUuid4 = 0x153,
+
+  kUuidMask1 = 0x154,
+  kUuidMask2 = 0x155,
+  kUuidMask3 = 0x156,
+  kUuidMask4 = 0x157,
 };
 
 aux::AuxHardwareConfig GetAux1HardwareConfig() {
@@ -340,10 +374,17 @@ aux::AuxHardwareConfig GetAux1HardwareConfig() {
               }},
           aux_options,
           };
-  } else if (g_measured_hw_family == 1) {
-    aux_options.i2c_pullup = PB_8;
-    aux_options.rs422_re = PB_10;
-    aux_options.rs422_de = PB_11;
+  } else if (g_measured_hw_family == 1 ||
+             g_measured_hw_family == 2) {
+    // Family 2 has no I2C pullup on AUX1.
+    aux_options.i2c_pullup =
+        g_measured_hw_family == 1 ? PB_8 : NC;
+
+    // Family 2 has no RS422.
+    aux_options.rs422_re =
+        g_measured_hw_family == 1 ? PB_10 : NC;
+    aux_options.rs422_de =
+        g_measured_hw_family == 1 ? PB_11 : NC;
     return aux::AuxHardwareConfig{
       {{
           //          ADC#  CHN    I2C      SPI      USART    TIMER
@@ -382,7 +423,8 @@ aux::AuxHardwareConfig GetAux2HardwareConfig() {
               }},
           aux_options,
           };
-  } else if (g_measured_hw_family == 1) {
+  } else if (g_measured_hw_family == 1 ||
+             g_measured_hw_family == 2) {
     aux_options.i2c_pullup = PA_12;
     return aux::AuxHardwareConfig{
       {{
@@ -415,7 +457,8 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
        ClockManager* clock_manager,
        SystemInfo* system_info,
        MillisecondTimer* timer,
-       FirmwareInfo* firmware)
+       FirmwareInfo* firmware,
+       Uuid* uuid)
       : aux1_port_("aux1", "ic_pz1", GetAux1HardwareConfig(),
                    &aux_adc_.aux_info[0],
                    persistent_config, command_manager, telemetry_manager,
@@ -471,7 +514,8 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
           }()),
         clock_manager_(clock_manager),
         system_info_(system_info),
-        firmware_(firmware) {}
+        firmware_(firmware),
+        uuid_(uuid) {}
 
   void Start() {
     bldc_.Start();
@@ -495,9 +539,24 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
     motor_position_.PollMillisecond();
   }
 
+  void StartFrame() override {
+    command_valid_ = false;
+    discard_all_ = false;
+  }
+
+  Action CompleteFrame() override {
+    if (discard_all_) {
+      command_valid_ = false;
+      return kDiscard;
+    }
+    return kAccept;
+  }
+
   uint32_t Write(multiplex::MicroServer::Register reg,
                  const multiplex::MicroServer::Value& value) override
       __attribute__ ((optimize("O3"))){
+    if (discard_all_) { return 0; }
+
     switch (static_cast<Register>(reg)) {
       case Register::kMode: {
         const auto new_mode_int = ReadIntMapping(value);
@@ -612,6 +671,11 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
         command_.kd_scale = ReadPwm(value);
         return 0;
       }
+      case Register::kCommandIlimitScale:
+      case Register::kStayWithinIlimitScale: {
+        command_.ilimit_scale = ReadPwm(value);
+        return 0;
+      }
       case Register::kStayWithinLower: {
         command_.bounds_min = ReadPosition(value);
         return 0;
@@ -635,6 +699,28 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
         return 0;
       }
 
+      case Register::kAux1Pwm1:
+      case Register::kAux1Pwm2:
+      case Register::kAux1Pwm3:
+      case Register::kAux1Pwm4:
+      case Register::kAux1Pwm5: {
+        const int pin =
+            static_cast<int>(reg) - static_cast<int>(Register::kAux1Pwm1);
+        aux1_port_.WritePwmOut(pin, ReadPwm(value));
+        return 0;
+      }
+
+      case Register::kAux2Pwm1:
+      case Register::kAux2Pwm2:
+      case Register::kAux2Pwm3:
+      case Register::kAux2Pwm4:
+      case Register::kAux2Pwm5: {
+        const int pin =
+            static_cast<int>(reg) - static_cast<int>(Register::kAux2Pwm1);
+        aux2_port_.WritePwmOut(pin, ReadPwm(value));
+        return 0;
+      }
+
       case Register::kSetOutputNearest: {
         const float position = ReadPosition(value);
         bldc_.SetOutputPositionNearest(position);
@@ -654,6 +740,23 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
         return 0;
       }
 
+      case Register::kUuidMask1:
+      case Register::kUuidMask2:
+      case Register::kUuidMask3:
+      case Register::kUuidMask4: {
+        const auto uuid = uuid_->uuid();
+        const auto index =
+            (static_cast<int>(reg) -
+             static_cast<int>(Register::kUuidMask1)) * 4;
+
+        const auto expected = *(reinterpret_cast<const int32_t*>(&uuid[index]));
+        const auto written = ReadInt32Mapping(value);
+        if (expected != written) {
+          discard_all_ = true;
+        }
+        return 0;
+      }
+
       case Register::kPosition:
       case Register::kVelocity:
       case Register::kMotorTemperature:
@@ -661,6 +764,7 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       case Register::kQCurrent:
       case Register::kDCurrent:
       case Register::kAbsPosition:
+      case Register::kPower:
       case Register::kTrajectoryComplete:
       case Register::kHomeState:
       case Register::kVoltage:
@@ -703,6 +807,10 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       case Register::kSerialNumber1:
       case Register::kSerialNumber2:
       case Register::kSerialNumber3:
+      case Register::kUuid1:
+      case Register::kUuid2:
+      case Register::kUuid3:
+      case Register::kUuid4:
       case Register::kRegisterMapVersion:
       case Register::kFirmwareVersion:
       case Register::kMultiplexId:
@@ -729,6 +837,12 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       multiplex::MicroServer::Register reg,
       size_t type) const override
       __attribute__ ((optimize("O3"))) {
+
+    if (discard_all_) {
+      // report unknown register for anything else
+      return static_cast<uint32_t>(1);
+    }
+
     auto vi32 = [](auto v) { return Value(static_cast<int32_t>(v)); };
 
     switch (static_cast<Register>(reg)) {
@@ -755,6 +869,9 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       }
       case Register::kAbsPosition: {
         return ScalePosition(encoder_value(1).filtered_value / encoder_config(1).cpr, type);
+      }
+      case Register::kPower: {
+        return ScalePower(bldc_.status().power_W, type);
       }
       case Register::kTrajectoryComplete: {
         return IntMapping(bldc_.status().trajectory_done ? 1 : 0, type);
@@ -850,7 +967,10 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
       case Register::kStayWithinKdScale: {
         return ScalePwm(command_.kd_scale, type);
       }
-
+      case Register::kCommandIlimitScale:
+      case Register::kStayWithinIlimitScale: {
+        return ScalePwm(command_.ilimit_scale, type);
+      }
       case Register::kPositionKp: {
         return ScaleTorque(bldc_.status().pid_position.p, type);
       }
@@ -976,6 +1096,26 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
         return IntMapping(clock_manager_->trim(), type);
       }
 
+      case Register::kAux1Pwm1:
+      case Register::kAux1Pwm2:
+      case Register::kAux1Pwm3:
+      case Register::kAux1Pwm4:
+      case Register::kAux1Pwm5: {
+        const int pin =
+            static_cast<int>(reg) - static_cast<int>(Register::kAux1Pwm1);
+        return ScalePwm(bldc_.aux1().pwm[pin], type);
+      }
+
+      case Register::kAux2Pwm1:
+      case Register::kAux2Pwm2:
+      case Register::kAux2Pwm3:
+      case Register::kAux2Pwm4:
+      case Register::kAux2Pwm5: {
+        const int pin =
+            static_cast<int>(reg) - static_cast<int>(Register::kAux2Pwm1);
+        return ScalePwm(bldc_.aux2().pwm[pin], type);
+      }
+
       case Register::kModelNumber: {
         if (type != 2) { break; }
 
@@ -1002,13 +1142,29 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
             static_cast<int>(Register::kSerialNumber1);
         return Value(vi32(serial_number.number[index]));
       }
+      case Register::kUuid1:
+      case Register::kUuid2:
+      case Register::kUuid3:
+      case Register::kUuid4: {
+        if (type != 2) { break; }
+
+        const auto uuid = uuid_->uuid();
+        const auto index =
+            (static_cast<int>(reg) -
+             static_cast<int>(Register::kUuid1)) * 4;
+        return Value(*(reinterpret_cast<const int32_t*>(&uuid[index])));
+      }
       case Register::kMultiplexId: {
         break;
       }
       case Register::kSetOutputNearest:
       case Register::kSetOutputExact:
       case Register::kRequireReindex:
-      case Register::kRecapturePositionVelocity: {
+      case Register::kRecapturePositionVelocity:
+      case Register::kUuidMask1:
+      case Register::kUuidMask2:
+      case Register::kUuidMask3:
+      case Register::kUuidMask4: {
         break;
       }
       case Register::kDriverFault1: {
@@ -1032,8 +1188,10 @@ class MoteusController::Impl : public multiplex::MicroServer::Server {
   ClockManager* const clock_manager_;
   SystemInfo* const system_info_;
   FirmwareInfo* const firmware_;
+  Uuid* const uuid_;
 
   bool command_valid_ = false;
+  bool discard_all_ = false;
   BldcServo::CommandData command_;
 };
 
@@ -1045,9 +1203,11 @@ MoteusController::MoteusController(micro::Pool* pool,
                                    ClockManager* clock_manager,
                                    SystemInfo* system_info,
                                    MillisecondTimer* timer,
-                                   FirmwareInfo* firmware)
+                                   FirmwareInfo* firmware,
+                                   Uuid* uuid)
     : impl_(pool, pool, persistent_config, command_manager, telemetry_manager,
-            multiplex_protocol, clock_manager, system_info, timer, firmware) {}
+            multiplex_protocol, clock_manager, system_info, timer, firmware,
+            uuid) {}
 
 MoteusController::~MoteusController() {}
 

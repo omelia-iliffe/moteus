@@ -44,6 +44,26 @@ MAX_FLASH_BLOCK_SIZE = 32
 FIND_TARGET_TIMEOUT = 0.01 if sys.platform != 'win32' else 0.05
 
 
+def _wrap_neg_pi_to_pi(value):
+    while value > math.pi:
+        value -= 2.0 * math.pi
+    while value < -math.pi:
+        value += 2.0 * math.pi
+    return value
+
+
+def lerp(array, ratio):
+    array_size = len(array)
+
+    left_index = int(math.floor(ratio * array_size))
+    right_index = (left_index + 1) % array_size
+    fraction = (ratio - left_index / array_size) * array_size
+    left_comp = array[left_index]
+    right_comp = array[right_index]
+
+    return (left_comp * (1.0 - fraction)) + (right_comp * fraction)
+
+
 class FirmwareUpgrade:
     '''This encodes "magic" rules about upgrading firmware, largely about
     how to munge configuration options so as to not cause behavior
@@ -54,14 +74,65 @@ class FirmwareUpgrade:
         self.old = old
         self.new = new
 
-        SUPPORTED_ABI_VERSION = 0x0106
+        SUPPORTED_ABI_VERSION = 0x0109
 
         if new > SUPPORTED_ABI_VERSION:
             raise RuntimeError(f"\nmoteus_tool needs to be upgraded to support this firmware\n\n (likely 'python -m pip install --upgrade moteus')\n\nThe provided firmare is ABI version 0x{new:04x} but this moteus_tool only supports up to 0x{SUPPORTED_ABI_VERSION:04x}")
 
+        if old > SUPPORTED_ABI_VERSION:
+            raise RuntimeError(f"\nmoteus_tool needs to be upgraded to support this board\n\n (likely 'python -m pip install --upgrade moteus')\n\nThe board firmware is ABI version 0x{old:04x} but this moteus_tool only supports up to 0x{SUPPORTED_ABI_VERSION:04x}")
+
     def fix_config(self, old_config):
         lines = old_config.split(b'\n')
         items = dict([line.split(b' ') for line in lines if b' ' in line])
+
+        if self.new <= 0x0108 and self.old >= 0x0109:
+            # When downgrading, we should warn if a motor thermistor
+            # value other than 47k is configured and enabled.
+            if (int(items.get(b'servo.enable_motor_temperature', '0')) != 0 and
+                int(float(items.get(b'servo.motor_thermistor_ohm', b'0.0'))) != 47000):
+                print("Motor thermistor values other than 47000 ohm not supported in firmware <= 0x0108, disabling")
+                items[b'servo.enable_motor_temperature'] = b'0'
+
+            items.pop(b'servo.motor_thermistor_ohm')
+
+            # Aux PWM out is not supported on <= 0x0108.
+            items.pop(b'aux1.pwm_period_us')
+            items.pop(b'aux2.pwm_period_us')
+
+            def make_key(mpsource, index):
+                return f'motor_position.sources.{mpsource}.compensation_table.{index}'.encode('utf8')
+
+            if make_key(0, 0) in items:
+                # Downsample encoder compensation bins.
+                print("Downsampling encoder compensation tables from version >= 0x0109")
+                for mpsource in range(0, 3):
+                    bins = []
+
+                    scale = float(items.pop(f'motor_position.sources.{mpsource}.compensation_scale'.encode('utf8'), 0.0)) / 127.0
+                    new_size = 256
+                    old_size = 32
+                    ratio = new_size // old_size
+
+                    for i in range(0, new_size):
+                        key = make_key(mpsource, i)
+                        bins.append(float(items.get(key)) * scale)
+                        del items[key]
+
+                    for i in range(0, old_size):
+                        items[make_key(mpsource, i)] = str(bins[i*ratio]).encode('utf8')
+
+        if self.new <= 0x0107 and self.old >= 0x0108:
+            if float(items.get(b'servo.bemf_feedforward', '0')) == 0.0:
+                print("Reverting servo.bemf_feedforward to 1.0")
+                items[b'servo.bemf_feedforward'] = b'1.0'
+
+        if self.new <= 0x0106 and self.old >= 0x0107:
+            # motor_position.output.sign was broken in older versions.
+            if int(items[b'motor_position.output.sign']) != 1:
+                print("WARNING: motor_position.output.sign==-1 is broken in order versions, disabling")
+                items[b'motor_position.output.sign'] = b'1'
+            pass
 
         if self.new <= 0x0105 and self.old >= 0x0106:
             # Downgrade the I2C polling rate.
@@ -279,6 +350,79 @@ class FirmwareUpgrade:
                     items[poll_rate_us_key] = str(int(poll_ms) * 1000).encode('utf8')
             print("Upgrading I2C rates for version 0x0106")
 
+        if self.new >= 0x0107 and self.old <= 0x0106:
+            if int(items.get(b'motor_position.output.sign', 1)) == -1:
+                print("Upgrading from motor_position.output.sign == -1, " +
+                      "this was broken before, behavior will change")
+
+            # No actual configuration updating is required here.
+            pass
+
+        if self.new >= 0x0108 and self.old <= 0x0107:
+            if float(items.get(b'servo.bemf_feedforward', 1.0)) == 1.0:
+                print("Upgrading servo.bemf_feedforward to 0.0")
+                items[b'servo.bemf_feedforward'] = b'0.0'
+
+        if self.new >= 0x0109 and self.old <= 0x0108:
+            # Try to fix up the motor commutation offset tables.
+            old_offsets = []
+            i = 0
+            while True:
+                key = f'motor.offset.{i}'.encode('utf8')
+                if key not in items:
+                    break
+                old_offsets.append(float(items.get(key)))
+                i += 1
+
+            offsets = old_offsets[:]
+
+            # Unwrap this, then re-center the whole thing around 0.
+            for i in range(1, len(offsets)):
+                offsets[i] = (offsets[i - 1] +
+                              _wrap_neg_pi_to_pi(offsets[i] -
+                                                 offsets[i - 1]))
+            mean_offset = sum(offsets) / len(offsets)
+            delta = mean_offset - _wrap_neg_pi_to_pi(mean_offset)
+            offsets = [x - delta for x in offsets]
+
+            if any([abs(a - b) > 0.01
+                    for a, b in zip(offsets, old_offsets)]):
+                print("Re-wrapping motor commutation offsets")
+                for i in range(len(offsets)):
+                    key = f'motor.offset.{i}'.encode('utf8')
+                    items[key] = f'{offsets[i]}'.encode('utf8')
+
+        if self.new >= 0x0109 and self.old <= 0x0108:
+            # If we had a motor thermistor enabled in previous
+            # versions, it was with a value of 47000.
+            if int(items.get(b'servo.enable_motor_temperature', b'0')) != 0:
+                print("Thermistor from <= 0x0109 assumed to be 47000")
+                items[b'servo.motor_thermistor_ohm'] = b'47000'
+
+            def make_key(mpsource, index):
+                return f'motor_position.sources.{mpsource}.compensation_table.{index}'.encode('utf8')
+
+            new_size = 256
+            old_size = 32
+            ratio = new_size // old_size
+
+            if make_key(0, 0) in items:
+                print("Upsampling encoder compensation tables for version >= 0x0109")
+                for mpsource in range(0, 3):
+                    old_bins = [float(items.get(make_key(mpsource, i)).decode('latin1')) for i in range(0, 32)]
+                    scale = max([abs(x) for x in old_bins])
+                    bins = []
+                    for i in range(new_size):
+                        if scale != 0.0:
+                            old_i = i // ratio
+                            value = lerp(old_bins, i / new_size)
+                            int_value = int(127 * value / scale)
+                        else:
+                            int_value = 0
+                        items[make_key(mpsource, i)] = str(int_value).encode('utf8')
+
+                    items[f'motor_position.sources.{mpsource}.compensation_scale'.encode('utf8')] = str(scale).encode('utf8')
+
 
         lines = [key + b' ' + value for key, value in items.items()]
         return b'\n'.join(lines)
@@ -303,6 +447,10 @@ def _round_nearest_4v(input_V):
     if input_V < 14.0:
         return 12.0
     return round(input_V / 4) * 4
+
+
+def _average(x):
+    return sum(x) / len(x)
 
 
 def expand_targets(targets):
@@ -620,7 +768,13 @@ class Stream:
     async def write_config_stream(self, fp):
         errors = []
 
-        for line in fp.readlines():
+        config_lines = fp.readlines()
+
+        for i, line in enumerate(config_lines):
+            if i % 20 == 0:
+                print(f"Writing config {100*i/len(config_lines):.0f}%  ",
+                      end='\r', flush=True)
+
             line = line.rstrip()
             if len(line) == 0:
                 continue
@@ -629,6 +783,8 @@ class Stream:
                 await self.command(line)
             except moteus.CommandError as ce:
                 errors.append(line.decode('latin1'))
+
+        print()
 
         if len(errors):
             print("\nSome config could not be set:")
@@ -793,12 +949,32 @@ class Stream:
 
             return cal_voltage
 
+    async def clear_motor_offsets(self):
+        i = 0
+        while True:
+            try:
+                await self.command(f"conf set motor.offset.{i} 0")
+            except moteus.CommandError as ce:
+                if 'error setting' in ce.message:
+                    # This means we hit the end of the offsets.
+                    break
+                else:
+                    raise
+            i += 1
+
     async def do_calibrate(self):
+        self.firmware = await self.read_data("firmware")
+
         # Determine what our calibration parameters are.
         self.calculate_calibration_parameters()
 
         print("This will move the motor, ensure it can spin freely!")
         await asyncio.sleep(2.0)
+
+        # Force all existing offsets to 0, that way if we had a
+        # discontinuous offset error, sending the stop will be able to
+        # clear it (and we are about to overwrite them anyway).
+        await self.clear_motor_offsets()
 
         # Clear any faults that may be there.
         await self.command("d stop")
@@ -951,16 +1127,12 @@ class Stream:
             if encoder_type == 4:  # hall
                 hall_configured = True
 
-        if self.args.cal_hall:
+        if self.args.cal_hall or hall_configured:
             if not hall_configured:
                 raise RuntimeError("--cal-hall specified, but hall sensors " +
                                    "not configured on device")
             return await self.calibrate_encoder_mapping_hall(encoder_cal_voltage)
         else:
-            if hall_configured:
-                raise RuntimeError(
-                    "Cannot perform encoder mapping with hall sensors, " +
-                    "use --cal-hall")
             try:
                 return await self.calibrate_encoder_mapping_absolute(encoder_cal_voltage)
             except:
@@ -972,6 +1144,10 @@ class Stream:
         if self.args.cal_motor_poles is None:
             raise RuntimeError(
                 'hall effect calibration requires specifying --cal-motor-poles')
+
+        if (self.args.cal_motor_poles % 2) == 1:
+            raise RuntimeError(
+                'only motors with even numbers of poles are supported')
 
         commutation_source = await self.read_config_int(
             "motor_position.commutation_source")
@@ -988,8 +1164,8 @@ class Stream:
             hall_cal_data.append(
                 (phase, motor_position.sources[commutation_source].raw))
 
-        if self.args.cal_raw:
-            with open(self.args.cal_raw, "wb") as f:
+        if self.args.cal_write_raw:
+            with open(self.args.cal_write_raw, "wb") as f:
                 f.write(json.dumps(hall_cal_data, indent=2).encode('utf8'))
 
         await self.command("d stop")
@@ -1033,21 +1209,26 @@ class Stream:
         await self.command("d stop")
 
     async def ensure_valid_theta(self, encoder_cal_voltage):
-        try:
-            # We might need to have some sense of pole count first.
-            if await self.read_config_double("motor.poles") == 0:
-                # Pick something arbitrary for now.
-                await self.command(f"conf set motor.poles 2")
+        # We might need to have some sense of pole count first.
+        if await self.read_config_double("motor.poles") == 0:
+            # Pick something arbitrary for now.
+            await self.command(f"conf set motor.poles 2")
 
+        try:
             motor_position = await self.read_data("motor_position")
-            if motor_position.homed == 0 and not motor_position.theta_valid:
-                # We need to find an index.
-                await self.find_index(encoder_cal_voltage)
         except RuntimeError:
             # Odds are we don't support motor_position, in which case
             # theta is always valid for the older versions that don't
             # support it.
-            pass
+            return
+
+        if motor_position.error != 0:
+            raise RuntimeError(
+                f"encoder error: {repr(motor_position.error)}")
+
+        if motor_position.homed == 0 and not motor_position.theta_valid:
+            # We need to find an index.
+            await self.find_index(encoder_cal_voltage)
 
     async def calibrate_encoder_mapping_absolute(self, encoder_cal_voltage):
         await self.ensure_valid_theta(encoder_cal_voltage)
@@ -1076,8 +1257,8 @@ class Stream:
                 # Some problem
                 raise RuntimeError(f'Error calibrating: {line}')
 
-        if self.args.cal_raw:
-            with open(self.args.cal_raw, "wb") as f:
+        if self.args.cal_write_raw:
+            with open(self.args.cal_write_raw, "wb") as f:
                 f.write(cal_data)
 
         cal_file = ce.parse_file(io.BytesIO(cal_data))
@@ -1090,7 +1271,10 @@ class Stream:
             cal_file,
             desired_direction=1 if not self.args.cal_invert else -1,
             max_remainder_error=self.args.cal_max_remainder,
-            allow_phase_invert=allow_phase_invert)
+            allow_phase_invert=allow_phase_invert,
+            allow_optimize=not self.args.cal_disable_optimize,
+            force_optimize=self.args.cal_force_optimize,
+        )
 
         if cal_result.errors:
             raise RuntimeError(f"Error(s) calibrating: {cal_result.errors}")
@@ -1243,6 +1427,16 @@ class Stream:
                 desired_encoder_bw_hz = min(
                     desired_encoder_bw_hz, 2e-2 / inductance)
 
+            # Also, limit the bandwidth for halls based on the number
+            # of poles and the estimated calibration speed.
+            if hall_output:
+                max_pole_bandwidth_hz = (
+                    0.5 * self.args.cal_motor_poles *
+                    self.args.cal_motor_speed)
+                desired_encoder_bw_hz = min(
+                    desired_encoder_bw_hz, max_pole_bandwidth_hz)
+
+
         # And our bandwidth with the filter can be no larger than
         # 1/30th the control rate.
         encoder_bw_hz = min(control_rate_hz / 30, desired_encoder_bw_hz)
@@ -1312,32 +1506,70 @@ class Stream:
 
         start_time = time.time()
 
+        SAMPLE_PERIOD_S = 0.02
+        AVERAGE_PERIOD_S = 0.10
+
+        AVERAGE_COUNT = int(AVERAGE_PERIOD_S / SAMPLE_PERIOD_S)
+
         def sign(x):
             return 1 if x >= 0 else -1
 
-        old_change = None
-        old_vel = None
+        velocity_samples = []
+        power_samples = []
+
         while True:
             data = await self.read_servo_stats()
-            velocity = data.velocity
 
-            # As a fallback, timeout after 1s of waiting.
+            total_current_A = math.hypot(data.d_A, data.q_A)
+            total_power_W = voltage * total_current_A
+
+            power_samples.append(total_power_W)
+
+            if len(power_samples) > AVERAGE_COUNT:
+                del power_samples[0]
+
+            velocity_samples.append(data.velocity)
+
+            if len(velocity_samples) > (3 * AVERAGE_COUNT):
+                del velocity_samples[0]
+
+            recent_average = _average(velocity_samples[-AVERAGE_COUNT:])
+
+            # As a fallback, timeout after a fixed amount of waiting.
             if (time.time() - start_time) > 2.0:
-                return velocity
+                return recent_average
 
-            if abs(velocity) < 0.2:
-                return velocity
+            if len(power_samples) >= AVERAGE_COUNT:
+                average_power_W = sum(power_samples) / len(power_samples)
+                max_power_W = (self.args.cal_max_kv_power_factor *
+                               self.args.cal_motor_power)
 
-            if old_vel is not None:
-                change = velocity - old_vel
-                if old_change is not None:
-                    if sign(old_change) != sign(change):
-                        return velocity
-                old_change = change
+                # This is a safety.  During speed measurement, current
+                # should always be near 0.  However, if the encoder
+                # commutation calibration failed, we can sometimes
+                # trigger large currents during the Kv detection phase
+                # while not actually moving.
+                if (abs(recent_average) < 0.2 and
+                    average_power_W > max_power_W):
+                    await self.command("d stop")
 
-            old_vel = velocity
+                    raise RuntimeError(
+                        f"Motor failed to spin, {average_power_W} > " +
+                        f"{max_power_W}")
 
-            await asyncio.sleep(0.1)
+            if (len(velocity_samples) >= AVERAGE_COUNT and
+                abs(recent_average) < 0.2):
+                return recent_average
+
+            if len(velocity_samples) == 3 * AVERAGE_COUNT:
+                average_1 = _average(velocity_samples[:AVERAGE_COUNT])
+                average_2 = _average(velocity_samples[AVERAGE_COUNT:2*AVERAGE_COUNT])
+                average_3 = recent_average
+
+                if sign(average_3 - average_2) != sign(average_2 - average_1):
+                    return recent_average
+
+            await asyncio.sleep(SAMPLE_PERIOD_S)
 
         return velocity
 
@@ -1397,8 +1629,10 @@ class Stream:
             geared_v_per_hz = 1.0 / _calculate_slope(voltages, speed_hzs)
 
             v_per_hz = (geared_v_per_hz *
-                        unwrapped_position_scale *
-                        motor_output_sign)
+                        unwrapped_position_scale)
+            if self.firmware.version <= 0x0106:
+                v_per_hz *= motor_output_sign
+
             print(f"v_per_hz (pre-gearbox)={v_per_hz}")
 
             await self.command(f"conf set servopos.position_min {original_position_min}")
@@ -1714,12 +1948,18 @@ async def async_main():
     parser.add_argument('--cal-force-kv', metavar='Kv', type=float,
                         default=None,
                         help='do not calibrate Kv, but use the specified value')
+    parser.add_argument('--cal-force-optimize', action='store_true',
+                        help='require nonlinear commutation optimization')
+    parser.add_argument('--cal-disable-optimize', action='store_true',
+                        help='prevent nonlinear commutation optimization')
 
 
     parser.add_argument('--cal-max-remainder', metavar='F',
                         type=float, default=0.1,
                         help='maximum allowed error in calibration')
-    parser.add_argument('--cal-raw', metavar='FILE', type=str,
+    parser.add_argument('--cal-max-kv-power-factor', type=float,
+                        default=1.25)
+    parser.add_argument('--cal-write-raw', metavar='FILE', type=str,
                         help='write raw calibration data')
 
     args = parser.parse_args()

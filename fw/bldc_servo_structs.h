@@ -143,6 +143,7 @@ struct BldcServoStatus {
   float position = 0.0f;
   float velocity = 0.0f;
   float torque_Nm = 0.0f;
+  float power_W = 0.0f;
 
   float velocity_filt = 0.0f;
 
@@ -158,6 +159,8 @@ struct BldcServoStatus {
   std::optional<float> control_velocity;
   float timeout_s = 0.0;
   bool trajectory_done = false;
+
+  float motor_max_velocity = 0.0f;
 
   float torque_error_Nm = 0.0f;
 
@@ -238,6 +241,7 @@ struct BldcServoStatus {
     a->Visit(MJ_NVP(position));
     a->Visit(MJ_NVP(velocity));
     a->Visit(MJ_NVP(torque_Nm));
+    a->Visit(MJ_NVP(power_W));
 
     a->Visit(MJ_NVP(velocity_filt));
 
@@ -251,6 +255,7 @@ struct BldcServoStatus {
     a->Visit(MJ_NVP(timeout_s));
     a->Visit(MJ_NVP(trajectory_done));
 
+    a->Visit(MJ_NVP(motor_max_velocity));
     a->Visit(MJ_NVP(torque_error_Nm));
 
     a->Visit(MJ_NVP(sin));
@@ -308,6 +313,7 @@ struct BldcServoCommandData {
 
   float kp_scale = 1.0f;
   float kd_scale = 1.0f;
+  float ilimit_scale = 1.0f;
 
   float velocity_limit = std::numeric_limits<float>::quiet_NaN();
   float accel_limit = std::numeric_limits<float>::quiet_NaN();
@@ -351,6 +357,7 @@ struct BldcServoCommandData {
     a->Visit(MJ_NVP(feedforward_Nm));
     a->Visit(MJ_NVP(kp_scale));
     a->Visit(MJ_NVP(kd_scale));
+    a->Visit(MJ_NVP(ilimit_scale));
     a->Visit(MJ_NVP(velocity_limit));
     a->Visit(MJ_NVP(accel_limit));
     a->Visit(MJ_NVP(fixed_voltage_override));
@@ -418,7 +425,9 @@ struct BldcServoConfig {
       30000;
 
   float i_gain = 20.0f;  // should match csa_gain from drv8323
-  float current_sense_ohm = 0.0005f;
+  float current_sense_ohm =
+      (g_measured_hw_family == 2 ? 0.002f :
+       0.0005f);
 
   // PWM rise time compensation
   float pwm_comp_off =
@@ -426,8 +435,8 @@ struct BldcServoConfig {
        ((g_measured_hw_rev <= 6) ? 0.015f :
         (g_measured_hw_rev <= 7) ? 0.055f :
         0.027f) :
-      g_measured_hw_family == 1 ?
-       0.027f :
+      g_measured_hw_family == 1 ? 0.027f :
+      g_measured_hw_family == 2 ? 0.015f :
       invalid_float()
       ;
   float pwm_comp_mag =
@@ -435,21 +444,29 @@ struct BldcServoConfig {
        ((g_measured_hw_rev <= 6) ? 0.005f :
         (g_measured_hw_rev <= 7) ? 0.005f :
         0.005f) :
-      g_measured_hw_family == 1 ?
-       0.005f :
-       invalid_float()
+      g_measured_hw_family == 1 ? 0.005f :
+      g_measured_hw_family == 2 ? 0.003f :
+      invalid_float()
       ;
-  float pwm_scale = 1.0f;
+  float pwm_scale =
+      g_measured_hw_family == 0 ? 1.0f :
+      g_measured_hw_family == 1 ? 1.0f :
+      g_measured_hw_family == 2 ? 1.38f :
+      invalid_float();
 
   // We pick a default maximum voltage based on the board revision.
   float max_voltage =
       g_measured_hw_family == 0 ?
       ((g_measured_hw_rev <= 5) ? 37.0f : 46.0f) :
-      g_measured_hw_family == 1 ?
-      56.0f :
+      g_measured_hw_family == 1 ? 56.0f :
+      g_measured_hw_family == 2 ? 54.0f :
       invalid_float()
       ;
-  float max_power_W = 450.0f;
+  float max_power_W =
+      (g_measured_hw_family == 0 ||
+       g_measured_hw_family == 1) ? 450.0f :
+      g_measured_hw_family == 2 ? 100.0f :
+      invalid_float();
 
   float derate_temperature = 50.0f;
   float fault_temperature = 75.0f;
@@ -458,6 +475,7 @@ struct BldcServoConfig {
   // the motor temperature will be available for throttling in
   // addition to the FET temperature.
   bool enable_motor_temperature = false;
+  float motor_thermistor_ohm = 10000.0f;
   float motor_derate_temperature = 50.0f;
   float motor_fault_temperature = std::numeric_limits<float>::quiet_NaN();
 
@@ -485,8 +503,13 @@ struct BldcServoConfig {
   float current_feedforward = 1.0f;
 
   // Use the configured motor Kv rating to apply a feedforward voltage
-  // based on the desired angular velocity.
-  float bemf_feedforward = 1.0f;
+  // based on the desired angular velocity.  This can be problematic
+  // if non-physical velocity profiles are commanded, as it can result
+  // in the maximum current limit being exceeded.
+  float bemf_feedforward = 0.0f;
+
+  // Set to true to disable bemf feedforward sanity checks.
+  bool bemf_feedforward_override = false;
 
   // Default values for the position mode velocity and acceleration
   // limits.
@@ -526,13 +549,21 @@ struct BldcServoConfig {
   float flux_brake_min_voltage =
       g_measured_hw_family == 0 ?
       ((g_measured_hw_rev <= 5) ? 34.5f : 43.5f) :
-      g_measured_hw_family == 1 ?
-      53.0f :
+      g_measured_hw_family == 1 ? 53.0f :
+      g_measured_hw_family == 2 ? 51.0f :
       invalid_float();
   float flux_brake_resistance_ohm = 0.025f;
 
-  float max_current_A = 100.0f;
-  float derate_current_A = -20.0f;
+  float max_current_A =
+      (g_measured_hw_family == 0 ||
+       g_measured_hw_family == 1) ? 100.0f :
+      g_measured_hw_family == 2 ? 20.0f :
+      invalid_float();
+  float derate_current_A =
+      (g_measured_hw_family == 0 ||
+       g_measured_hw_family == 1) ? -20.0f :
+      g_measured_hw_family == 2 ? -3.0f :
+      invalid_float();
 
   // When the maximum velocity exceeds this value, a current limit
   // will begin to be applied.  When it reaches max_velocity +
@@ -579,6 +610,7 @@ struct BldcServoConfig {
     a->Visit(MJ_NVP(derate_temperature));
     a->Visit(MJ_NVP(fault_temperature));
     a->Visit(MJ_NVP(enable_motor_temperature));
+    a->Visit(MJ_NVP(motor_thermistor_ohm));
     a->Visit(MJ_NVP(motor_derate_temperature));
     a->Visit(MJ_NVP(motor_fault_temperature));
     a->Visit(MJ_NVP(velocity_threshold));
@@ -589,6 +621,7 @@ struct BldcServoConfig {
     a->Visit(MJ_NVP(pid_position));
     a->Visit(MJ_NVP(current_feedforward));
     a->Visit(MJ_NVP(bemf_feedforward));
+    a->Visit(MJ_NVP(bemf_feedforward_override));
     a->Visit(MJ_NVP(default_velocity_limit));
     a->Visit(MJ_NVP(default_accel_limit));
     a->Visit(MJ_NVP(voltage_mode_control));

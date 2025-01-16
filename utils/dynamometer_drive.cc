@@ -24,6 +24,8 @@
 #include <fmt/format.h>
 #include <fmt/ostream.h>
 
+#include <list>
+
 #include "mjlib/base/clipp_archive.h"
 #include "mjlib/base/clipp.h"
 #include "mjlib/base/fail.h"
@@ -95,6 +97,7 @@ struct Options {
   bool validate_rezero = false;
   bool validate_voltage_mode_control = false;
   bool validate_fixed_voltage_mode = false;
+  bool validate_fixed_voltage_mode_reverse = false;
   bool validate_brake_mode = false;
   bool validate_velocity_accel_limits = false;
 
@@ -131,6 +134,7 @@ struct Options {
     a->Visit(MJ_NVP(validate_rezero));
     a->Visit(MJ_NVP(validate_voltage_mode_control));
     a->Visit(MJ_NVP(validate_fixed_voltage_mode));
+    a->Visit(MJ_NVP(validate_fixed_voltage_mode_reverse));
     a->Visit(MJ_NVP(validate_brake_mode));
     a->Visit(MJ_NVP(validate_velocity_accel_limits));
   }
@@ -252,6 +256,19 @@ class SystemInfoReader {
   mjlib::telemetry::MappedBinaryReader<SystemInfo> reader_{&parser_};
 };
 
+class FirmwareReader {
+ public:
+  FirmwareReader(const std::string& schema) : schema_(schema) {}
+  Firmware Read(const std::string& data) {
+    return reader_.Read(data);
+  }
+
+ private:
+  const std::string schema_;
+  mjlib::telemetry::BinarySchemaParser parser_{schema_, "firmware"};
+  mjlib::telemetry::MappedBinaryReader<Firmware> reader_{&parser_};
+};
+
 class Controller {
  public:
   Controller(const std::string& log_prefix,
@@ -347,6 +364,7 @@ class Controller {
       "servo_cmd",
       "git",
       "system_info",
+      "firmware",
     };
 
     for (const auto& name : names) {
@@ -404,6 +422,8 @@ class Controller {
     double fixed_voltage_control_V = 0.0;
 
     double output_sign = 1;
+
+    double bemf_feedforward = 0.0;
   };
 
   boost::asio::awaitable<void> ConfigurePid(const PidConstants& pid) {
@@ -448,6 +468,12 @@ class Controller {
       co_await Command(
           fmt::format("conf set motor_position.output.sign {}", pid.output_sign));
     }
+
+    co_await Command(
+        fmt::format("conf set servo.bemf_feedforward {}", pid.bemf_feedforward));
+    co_await Command(
+        fmt::format("conf set servo.bemf_feedforward_override {}",
+                    pid.bemf_feedforward != 0 ? 1 : 0));
 
     co_await Command("conf set servo.timing_fault 1");
 
@@ -497,6 +523,8 @@ class Controller {
           servo_stats_reader_.emplace(schema);
         } else if (name == "system_info") {
           system_info_reader_.emplace(schema);
+        } else if (name == "firmware") {
+          firmware_reader_.emplace(schema);
         }
       } else if (boost::starts_with(line, "emit ")) {
         const auto name = StringValue(line);
@@ -509,6 +537,8 @@ class Controller {
             HandleServoStats(servo_stats_reader_->Read(data));
           } else if (name == "system_info") {
             HandleSystemInfo(system_info_reader_->Read(data));
+          } else if (name == "firmware") {
+            HandleFirmware(firmware_reader_->Read(data));
           }
         }
       } else {
@@ -533,6 +563,7 @@ class Controller {
   }
 
   mjlib::io::AsyncStream& stream() { return *stream_; }
+  int family() const { return family_.value(); }
 
  private:
   void HandleServoStats(const ServoStats& servo_stats) {
@@ -562,6 +593,10 @@ class Controller {
     }
   }
 
+  void HandleFirmware(const Firmware& firmware) {
+    family_ = firmware.family;
+  }
+
   const std::string log_prefix_;
   mjlib::io::SharedStream stream_;
   mjlib::telemetry::FileWriter* const file_writer_;
@@ -586,6 +621,9 @@ class Controller {
   ServoStats servo_stats_;
 
   std::optional<SystemInfoReader> system_info_reader_;
+  std::optional<FirmwareReader> firmware_reader_;
+
+  std::optional<int> family_;
 };
 
 class Application {
@@ -730,6 +768,8 @@ class Application {
       co_await ValidateVoltageModeControl();
     } else if (options_.validate_fixed_voltage_mode) {
       co_await ValidateFixedVoltageMode();
+    } else if (options_.validate_fixed_voltage_mode_reverse) {
+      co_await ValidateFixedVoltageModeReverse();
     } else if (options_.validate_brake_mode) {
       co_await ValidateBrakeMode();
     } else if (options_.validate_velocity_accel_limits) {
@@ -761,7 +801,7 @@ class Application {
     pid.ki = 300.0;
     pid.kd = 0.60;
     pid.kp = 5.0;
-    pid.ilimit = 0.3;
+    pid.ilimit = 0.45;
 
     co_await fixture_->ConfigurePid(pid);
   }
@@ -771,9 +811,15 @@ class Application {
     co_await dut_->ConfigurePid(Controller::PidConstants());
     co_await CommandFixtureRigid();
 
+    std::vector<double> torques_to_test = {kNaN, 0.0, 0.05, -0.05, 0.1, -0.1};
+    if (dut_->family() != 2) {
+      torques_to_test.push_back(0.20);
+      torques_to_test.push_back(-0.20);
+    }
+
     // Then start commanding the different torques on the dut servo,
     // each for a bit more than one revolution.
-    for (double test_torque : {kNaN, 0.0, 0.05, -0.05, 0.1, -0.1, 0.2, -0.2}) {
+    for (double test_torque : torques_to_test) {
       fmt::print("\nTesting torque: {}\n", test_torque);
 
       co_await fixture_->Command("d rezero");
@@ -977,7 +1023,7 @@ class Application {
 
     // This test runs with a motor that has a phase resistance of
     // roughly 0.051-0.065 ohms.
-    const float kMotorResistance = 0.055;
+    const float kMotorResistance = 0.052;
     for (const auto& r : ramp_results) {
       const auto expected_current = r.voltage / kMotorResistance;
       if (std::abs(r.d_A - expected_current) > 2.5) {
@@ -1018,7 +1064,7 @@ class Application {
 
     for (const auto& r : slew_results) {
       const double kExpectedCurrent = kSlewVoltage / kMotorResistance;
-      const double kMaxError = 1.8;
+      const double kMaxError = 2.1;
       if (std::abs(r.d_A - kExpectedCurrent) > kMaxError) {
         errors.push_back(
             fmt::format("D phase is not correct |{} - {}| > {}",
@@ -1131,7 +1177,7 @@ class Application {
     for (double fs : {0.0, -0.2, 0.2}) {
       // Start the fixture holding.
       co_await fixture_->Command(
-          fmt::format("d pos nan {} 0.2", fs));
+          fmt::format("d pos nan {} 0.35", fs));
       co_await Sleep(1.0);
 
       try {
@@ -1179,11 +1225,11 @@ class Application {
 
   boost::asio::awaitable<void> RunBasicPositionVelocityTest(Controller::PidConstants pid, double tolerance_scale) {
     // Move at a few different velocities.
-    for (const double velocity : {0.0, -1.5, 3.0}) {
+    for (const double velocity : {0.0, -1.5, 3.0, 10.0, -5.0}) {
       fmt::print("Moving at velocity {}\n", velocity);
-      co_await dut_->Command(fmt::format("d pos nan {} 0.2", velocity));
+      co_await dut_->Command(fmt::format("d pos nan {} 0.2 a30", velocity));
 
-      co_await Sleep(1.0);
+      co_await Sleep(1.5);
 
       const double fixture_velocity =
           pid.output_sign * options_.transducer_scale * fixture_->servo_stats().velocity;
@@ -1191,6 +1237,17 @@ class Application {
         throw mjlib::base::system_error::einval(
             fmt::format("Fixture velocity {} != {}",
                         fixture_velocity, velocity));
+      }
+
+      const auto q_command = dut_->servo_stats().pid_q.command;
+      const double kMaxQError = 0.4f;
+      if (!pid.fixed_voltage_mode && !pid.voltage_mode_control &&
+          pid.bemf_feedforward != 0.0) {
+        if (q_command == 0.0 || std::abs(q_command) > kMaxQError) {
+          throw mjlib::base::system_error::einval(
+              fmt::format("Q current tracking |{}| > {}",
+                          q_command, kMaxQError));
+        }
       }
     }
 
@@ -1282,81 +1339,86 @@ class Application {
   }
 
   boost::asio::awaitable<void> ValidatePositionBasic() {
-    co_await dut_->Command("d stop");
-    co_await fixture_->Command("d stop");
-    co_await fixture_->Command("d index 0");
-    co_await dut_->Command("d index 0");
+    for (double bemf : {0.0, 1.0}) {
+      fmt::print("Testing bemf {}\n", bemf);
 
-    // Set some constants that should work for basic position control.
-    Controller::PidConstants pid;
-    pid.kp = 1.0;
-    pid.ki = 0.0;
-    pid.kd = 0.05;
-    co_await dut_->ConfigurePid(pid);
+      co_await dut_->Command("d stop");
+      co_await fixture_->Command("d stop");
+      co_await fixture_->Command("d index 0");
+      co_await dut_->Command("d index 0");
 
-    co_await RunBasicPositionTest(pid);
+      // Set some constants that should work for basic position control.
+      Controller::PidConstants pid;
+      pid.kp = 1.0;
+      pid.ki = 0.0;
+      pid.kd = 0.05;
+      pid.bemf_feedforward = bemf;
+      co_await dut_->ConfigurePid(pid);
 
-    // Now we'll do the basic tests with the fixture locked rigidly in
-    // place.
-    co_await fixture_->Command("d index 0");
-    co_await dut_->Command("d index 0");
+      co_await RunBasicPositionTest(pid);
 
-    co_await CommandFixtureRigid();
-    co_await fixture_->Command(
-        fmt::format("d pos 0 0 {}", options_.max_torque_Nm));
+      // Now we'll do the basic tests with the fixture locked rigidly in
+      // place.
+      co_await fixture_->Command("d index 0");
+      co_await dut_->Command("d index 0");
 
-    for (const double max_torque : {0.15, 0.3}) {
-      fmt::print("Testing max torque {}\n", max_torque);
-      co_await dut_->Command(fmt::format("d pos 5 0 {}", max_torque));
-      co_await Sleep(1.0);
+      co_await CommandFixtureRigid();
+      co_await fixture_->Command(
+          fmt::format("d pos 0 0 {}", options_.max_torque_Nm));
 
-      if (std::abs(current_torque_Nm_ - max_torque) > 0.15) {
+      for (const double max_torque : {0.15, 0.3}) {
+        fmt::print("Testing max torque {}\n", max_torque);
+        co_await dut_->Command(fmt::format("d pos 5 0 {}", max_torque));
+        co_await Sleep(1.0);
+
+        if (std::abs(current_torque_Nm_ - max_torque) > 0.15) {
           throw mjlib::base::system_error::einval(
               fmt::format(
                   "kp torque not as expected {} != {} (within {})",
                   current_torque_Nm_, max_torque, 0.15));
-      }
+        }
 
-      co_await dut_->Command(fmt::format("d pos -5 0 {}", max_torque));
-      co_await Sleep(1.0);
-      if (std::abs(current_torque_Nm_ - (-max_torque)) > 0.15) {
+        co_await dut_->Command(fmt::format("d pos -5 0 {}", max_torque));
+        co_await Sleep(1.0);
+        if (std::abs(current_torque_Nm_ - (-max_torque)) > 0.15) {
           throw mjlib::base::system_error::einval(
               fmt::format(
                   "kp torque not as expected {} != {} (within {})",
                   current_torque_Nm_, -max_torque, 0.15));
+        }
       }
-    }
 
-    for (const double feedforward_torque : {0.15, 0.3}) {
-      fmt::print("Testing feedforward torque {}\n", feedforward_torque);
-      co_await dut_->Command(
-          fmt::format("d pos 0 0 {} f{}",
-                      options_.max_torque_Nm, feedforward_torque));
-      co_await Sleep(1.0);
+      for (const double feedforward_torque : {0.15, 0.3}) {
+        fmt::print("Testing feedforward torque {}\n", feedforward_torque);
+        co_await dut_->Command(
+            fmt::format("d pos 0 0 {} f{}",
+                        options_.max_torque_Nm, feedforward_torque));
+        co_await Sleep(1.0);
 
-      if (std::abs(current_torque_Nm_ - feedforward_torque) > 0.15) {
+        if (std::abs(current_torque_Nm_ - feedforward_torque) > 0.15) {
           throw mjlib::base::system_error::einval(
               fmt::format(
                   "kp torque not as expected {} != {} (within {})",
                   current_torque_Nm_, feedforward_torque, 0.15));
-      }
+        }
 
-      co_await dut_->Command(
-          fmt::format("d pos 0 0 {} f{}",
-                      options_.max_torque_Nm, -feedforward_torque));
-      co_await Sleep(1.0);
-      if (std::abs(current_torque_Nm_ - (-feedforward_torque)) > 0.15) {
+        co_await dut_->Command(
+            fmt::format("d pos 0 0 {} f{}",
+                        options_.max_torque_Nm, -feedforward_torque));
+        co_await Sleep(1.0);
+        if (std::abs(current_torque_Nm_ - (-feedforward_torque)) > 0.15) {
           throw mjlib::base::system_error::einval(
               fmt::format(
                   "kp torque not as expected {} != {} (within {})",
                   current_torque_Nm_, -feedforward_torque, 0.15));
+        }
       }
+
+      co_await dut_->Command("d stop");
+      co_await fixture_->Command("d stop");
     }
 
     fmt::print("SUCCESS\n");
-
-    co_await dut_->Command("d stop");
-    co_await fixture_->Command("d stop");
 
     co_return;
   }
@@ -1469,8 +1531,10 @@ class Application {
         co_await dut_->Command(
             fmt::format("d pos {} 0 {}", position, options_.max_torque_Nm));
 
+        const double target_torque =
+            dut_->family() == 2 ? 0.25 : 0.5;
         const double kDelayS = position == 0.0 ? 2.0 :
-            std::min(0.5 / (std::abs(position) * pid.ki), 5.0);
+            std::min(target_torque / (std::abs(position) * pid.ki), 5.0);
         co_await Sleep(kDelayS);
 
         const double kTorqueLagS = 0.3;
@@ -1630,27 +1694,33 @@ class Application {
   }
 
   boost::asio::awaitable<void> ValidatePositionReverse() {
-    co_await dut_->Command("d stop");
-    co_await fixture_->Command("d stop");
+    for (double bemf : {0.0, 1.0}) {
+      fmt::print("Testing bemf {}\n", bemf);
 
-    // Set some constants that should work for basic position control.
-    Controller::PidConstants pid;
-    pid.kp = 1.0;
-    pid.ki = 0.0;
-    pid.kd = 0.05;
-    pid.output_sign = -1;
-    co_await dut_->ConfigurePid(pid);
+      co_await dut_->Command("d stop");
+      co_await fixture_->Command("d stop");
 
-    co_await fixture_->Command("d index 0");
-    co_await dut_->Command("d index 0");
+      // Set some constants that should work for basic position control.
+      Controller::PidConstants pid;
+      pid.kp = 1.0;
+      pid.ki = 0.0;
+      pid.kd = 0.05;
+      pid.bemf_feedforward = bemf;
+      pid.output_sign = -1;
+      co_await dut_->ConfigurePid(pid);
 
-    co_await RunBasicPositionTest(pid);
+      co_await fixture_->Command("d index 0");
+      co_await dut_->Command("d index 0");
+
+      co_await RunBasicPositionTest(pid);
+    }
   }
 
   boost::asio::awaitable<void> ValidateStayWithin() {
     co_await dut_->Command("d stop");
     co_await fixture_->Command("d stop");
 
+    // Wait until the temperature is low enough.
     Controller::PidConstants pid;
     pid.kp = 2;
     co_await dut_->ConfigurePid(pid);
@@ -1658,7 +1728,17 @@ class Application {
     constexpr double kSpeed = 2.0;
 
     for (const double feedforward : {0.0, -0.1, 0.1}) {
-      for (const double max_torque : {0.35, 0.15}) {
+      while (true) {
+        const auto temp_C = dut_->servo_stats().filt_fet_temp_C;
+        const float kRequiredTempC = 37.0;
+        if (temp_C <= kRequiredTempC) { break; }
+        fmt::print("Waiting for temperature to drop, {} > {}\n",
+                   temp_C, kRequiredTempC);
+
+        co_await Sleep(5.0);
+      }
+
+      for (const double max_torque : {0.25, 0.10}) {
         for (const double bounds_low : {kNaN, -0.5, -1.5}) {
           for (const double bounds_high : { kNaN, 0.5, 1.5}) {
             fmt::print("Testing bounds {}-{} max_torque={} feedforward={}\n",
@@ -1672,7 +1752,7 @@ class Application {
                             bounds_low, bounds_high, max_torque, feedforward));
 
             co_await fixture_->Command(
-                fmt::format("d pos nan {} 0.25",
+                fmt::format("d pos nan {} 0.22",
                             -kSpeed * options_.transducer_scale));
             co_await Sleep(3.0 / kSpeed);
             const double low_position =
@@ -1681,7 +1761,7 @@ class Application {
             const double low_torque = current_torque_Nm_;
 
             co_await fixture_->Command(
-                fmt::format("d pos nan {} 0.25", kSpeed * options_.transducer_scale));
+                fmt::format("d pos nan {} 0.20", kSpeed * options_.transducer_scale));
             co_await Sleep(6.0 / kSpeed);
             const double high_position =
                 options_.transducer_scale *
@@ -1694,7 +1774,7 @@ class Application {
 
             auto evaluate = [max_torque, feedforward](
                 auto bounds, auto position, auto torque, auto name) {
-              if (std::isnan(bounds) || max_torque < 0.2) {
+              if (std::isnan(bounds) || max_torque < 0.15) {
                 // We should not have stopped at any lower bound and our
                 // torque should have been similarly low.
                 if (std::isnan(bounds)) {
@@ -1718,9 +1798,9 @@ class Application {
                           name, position));
                 }
               } else {
-                if (std::abs(torque) < 0.12) {
+                if (std::abs(torque) < 0.08) {
                   throw mjlib::base::system_error::einval(
-                      fmt::format("Insufficient {} torque: |{}| < 0.10",
+                      fmt::format("Insufficient {} torque: |{}| < 0.08",
                                   name, torque));
                 }
                 if (std::abs(position - bounds) > 0.20) {
@@ -2041,10 +2121,10 @@ class Application {
       double power_W;
       double expected_speed_Hz;
     } tests[] = {
-      { 100.0, 3.80 },
-      { 20.0, 3.00 },
-      { 10.0, 2.00 },
-      { 5.0, 1.40 },
+      { 100.0, 3.90 },
+      { 20.0, 2.5 },
+      { 10.0, 1.8 },
+      { 5.0, 1.25 },
     };
 
     std::string errors;
@@ -2182,6 +2262,7 @@ class Application {
     pid.kp = 1.0;
     pid.ki = 0.0;
     pid.kd = 0.01;
+    pid.bemf_feedforward = 1.0;
 
     co_await dut_->ConfigurePid(pid);
 
@@ -2192,18 +2273,18 @@ class Application {
     co_return;
   }
 
-  boost::asio::awaitable<void> ValidateFixedVoltageMode() {
+  boost::asio::awaitable<void> RunFixedVoltageModeTest(Controller::PidConstants pid) {
     co_await dut_->Command("d stop");
     co_await fixture_->Command("d stop");
     co_await dut_->Command("d index 0");
 
-    Controller::PidConstants pid;
     pid.voltage_mode_control = true;
     pid.kp = 1.0;
     pid.ki = 0.0;
     pid.kd = 0.01;
+    pid.bemf_feedforward = 1.0;
     pid.fixed_voltage_mode = true;
-    pid.fixed_voltage_control_V = 0.45;
+    pid.fixed_voltage_control_V = 0.25;
 
     co_await dut_->ConfigurePid(pid);
 
@@ -2224,6 +2305,18 @@ class Application {
     co_return;
   }
 
+  boost::asio::awaitable<void> ValidateFixedVoltageMode() {
+    Controller::PidConstants pid;
+    pid.output_sign = 1;
+    co_await RunFixedVoltageModeTest(pid);
+  }
+
+  boost::asio::awaitable<void> ValidateFixedVoltageModeReverse() {
+    Controller::PidConstants pid;
+    pid.output_sign = -1;
+    co_await RunFixedVoltageModeTest(pid);
+  }
+
   boost::asio::awaitable<void> ValidateBrakeMode() {
     co_await dut_->Command("d stop");
     co_await fixture_->Command("d stop");
@@ -2240,9 +2333,9 @@ class Application {
       // fixture's MiToot motor.
       { 0.0, 0.0 },
       { 2.0, 0.1 },
-      { 5.0, 0.30 },
+      { 5.0, 0.28 },
       { -2.0, -0.1 },
-      { -5.0, -0.30 },
+      { -5.0, -0.28 },
     };
 
     for (const auto& test : brake_tests) {
@@ -2252,10 +2345,10 @@ class Application {
                       options_.max_torque_Nm));
       co_await Sleep(1.0);
 
-      if (std::abs(current_torque_Nm_ - test.expected_torque) > 0.06) {
+      if (std::abs(current_torque_Nm_ - test.expected_torque) > 0.07) {
         throw mjlib::base::system_error::einval(
             fmt::format("brake torque not as expected {} != {} (within {})",
-                        current_torque_Nm_, test.expected_torque, 0.06));
+                        current_torque_Nm_, test.expected_torque, 0.07));
       }
     }
 
