@@ -19,6 +19,7 @@
 
 use crate::error::Result;
 use crate::transport::transaction::Request;
+use crate::TransportOps;
 use moteus_protocol::CanFdFrame;
 use std::time::Duration;
 
@@ -131,6 +132,32 @@ pub trait TransportDevice: Send {
 
     /// Returns the current timeout.
     fn timeout(&self) -> Duration;
+}
+
+impl<T> TransportOps for T
+where
+    T: TransportDevice,
+{
+    fn cycle(&mut self, requests: &mut [Request]) -> Result<()> {
+        self.transaction(requests)
+    }
+    fn write(&mut self, frame: &CanFdFrame) -> Result<()> {
+        self.write(frame)
+    }
+    fn read(&mut self, _channel: Option<usize>) -> Result<Option<CanFdFrame>> {
+        self.read()
+    }
+
+    fn flush_read(&mut self, _channel: Option<usize>) -> Result<()> {
+        self.flush()
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.set_timeout(timeout);
+    }
+    fn timeout(&self) -> Duration {
+        self.timeout()
+    }
 }
 
 /// An async transport device for CAN-FD communication.

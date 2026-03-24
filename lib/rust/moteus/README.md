@@ -24,7 +24,7 @@ use moteus::{BlockingController, command::PositionCommand};
 
 fn main() -> Result<(), moteus::Error> {
     // Auto-discovers transport on first use
-    let mut ctrl = BlockingController::new(1);
+    let mut ctrl = BlockingController::new(1)?;
 
     // Clear any faults
     ctrl.set_stop()?;
@@ -70,11 +70,11 @@ For more control, you can specify a transport explicitly:
 ```rust,no_run
 use moteus::{BlockingController, Transport};
 use moteus::transport::socketcan::SocketCan;
+use std::sync::{Arc, Mutex};
 
 fn main() -> Result<(), moteus::Error> {
-    let transport = Transport::from_device(SocketCan::new("can0")?);
-    let mut ctrl = BlockingController::new(1)
-        .transport(transport);
+    let transport = Arc::new(Mutex::new(SocketCan::new("can0")?));
+    let mut ctrl = BlockingController::new_with_transport(1, transport);
 
     ctrl.set_stop()?;
     Ok(())
@@ -93,7 +93,7 @@ let opts = TransportOptions::new()
     .socketcan_interfaces(vec!["can0"])
     .timeout(Duration::from_millis(200));
 
-let mut ctrl = BlockingController::with_options(1, &opts);
+let mut ctrl = BlockingController::new_with_options(1, &opts);
 ```
 
 ## Low-Level Protocol Access

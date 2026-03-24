@@ -28,7 +28,7 @@
 //!
 //! fn main() -> Result<(), moteus::Error> {
 //!     // Auto-discover transport (simplest usage)
-//!     let mut ctrl = BlockingController::new(1);
+//!     let mut ctrl = BlockingController::new(1)?;
 //!     ctrl.set_stop()?;
 //!     Ok(())
 //! }
@@ -44,7 +44,7 @@
 //! fn main() -> Result<(), moteus::Error> {
 //!     let opts = TransportOptions::new()
 //!         .socketcan_interfaces(vec!["can0"]);
-//!     let mut ctrl = BlockingController::with_options(1, &opts);
+//!     let mut ctrl = BlockingController::new_with_options(1, &opts)?;
 //!     Ok(())
 //! }
 //! ```
@@ -66,77 +66,6 @@ use moteus_protocol::Resolution;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Holds the transport backing a `BlockingController`.
-///
-/// Transport resolution is lazy: when created with `Deferred`, the actual
-/// transport is not created until the first operation that requires it.
-/// This matches the Python and C++ library behavior.
-pub(crate) enum TransportHolder {
-    /// Transport not yet resolved; will auto-discover on first use.
-    Deferred(Option<TransportOptions>),
-    /// User-provided explicit transport (type-erased).
-    Explicit(Box<dyn TransportOps + Send>),
-    /// Global singleton transport.
-    Singleton(Arc<Mutex<Transport>>),
-}
-
-impl TransportHolder {
-    /// Ensure the transport is resolved, performing auto-discovery if needed.
-    fn resolve(&mut self) -> Result<()> {
-        if let TransportHolder::Deferred(opts) = self {
-            let transport = get_singleton_transport(opts.as_ref())?;
-            *self = TransportHolder::Singleton(transport);
-        }
-        Ok(())
-    }
-
-    /// Execute a cycle on the held transport, resolving lazily if needed.
-    pub(crate) fn cycle(&mut self, requests: &mut [Request]) -> Result<()> {
-        self.resolve()?;
-        match self {
-            TransportHolder::Explicit(t) => t.cycle(requests),
-            TransportHolder::Singleton(t) => {
-                let mut guard = t
-                    .lock()
-                    .map_err(|_| Error::Protocol("Transport mutex poisoned".to_string()))?;
-                guard.cycle(requests)
-            }
-            TransportHolder::Deferred(_) => unreachable!(),
-        }
-    }
-
-    /// Set the timeout on the held transport.
-    fn set_timeout(&mut self, timeout: Duration) {
-        match self {
-            TransportHolder::Deferred(Some(opts)) => opts.timeout = timeout,
-            TransportHolder::Deferred(None) => {
-                let mut opts = TransportOptions::new();
-                opts.timeout = timeout;
-                *self = TransportHolder::Deferred(Some(opts));
-            }
-            TransportHolder::Explicit(t) => t.set_timeout(timeout),
-            TransportHolder::Singleton(t) => {
-                if let Ok(mut guard) = t.lock() {
-                    guard.set_timeout(timeout);
-                }
-            }
-        }
-    }
-
-    /// Get the timeout from the held transport.
-    fn timeout(&self) -> Duration {
-        match self {
-            TransportHolder::Deferred(Some(opts)) => opts.timeout,
-            TransportHolder::Deferred(None) => crate::transport::factory::DEFAULT_TIMEOUT,
-            TransportHolder::Explicit(t) => t.timeout(),
-            TransportHolder::Singleton(t) => t
-                .lock()
-                .map(|g| g.timeout())
-                .unwrap_or(crate::transport::factory::DEFAULT_TIMEOUT),
-        }
-    }
-}
-
 /// A blocking controller for a single moteus device.
 ///
 /// This combines the frame-building capabilities of `Controller` with
@@ -153,7 +82,7 @@ impl TransportHolder {
 ///
 /// fn main() -> Result<(), moteus::Error> {
 ///     // Create with auto-discovered transport (simplest)
-///     let mut ctrl = BlockingController::new(1);
+///     let mut ctrl = BlockingController::new(1)?;
 ///
 ///     // Query the controller (transport is discovered here)
 ///     let result = ctrl.query()?;
@@ -168,33 +97,34 @@ impl TransportHolder {
 ///     use moteus::TransportOptions;
 ///     let opts = TransportOptions::new()
 ///         .socketcan_interfaces(vec!["can0"]);
-///     let mut ctrl = BlockingController::with_options(1, &opts);
+///     let mut ctrl = BlockingController::new_with_options(1, &opts)?;
 ///     Ok(())
 /// }
 /// ```
-pub struct BlockingController {
+pub struct BlockingController<T> {
     /// Frame builder
     pub controller: Controller,
     /// Transport for communication
-    pub(crate) transport: TransportHolder,
+    pub(crate) transport: T,
 }
 
-impl std::fmt::Debug for BlockingController {
+impl<T> std::fmt::Debug for BlockingController<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let transport_state = match &self.transport {
-            TransportHolder::Deferred(_) => "Deferred",
-            TransportHolder::Explicit(_) => "Explicit",
-            TransportHolder::Singleton(_) => "Singleton",
-        };
+        // let transport_state = match &self.transport {
+        // TransportHolder::Deferred(_) => "Deferred",
+        // TransportHolder::Explicit(_) => "Explicit",
+        // TransportHolder::Singleton(_) => "Singleton",
+        // };
         f.debug_struct("BlockingController")
             .field("id", &self.controller.id)
             .field("address", &self.controller.address)
-            .field("transport", &transport_state)
+            // .field("transport", &transport_state)
             .finish()
     }
 }
 
-impl BlockingController {
+/// BlockingController with auto discovery `Transport` as Transport
+impl BlockingController<Arc<Mutex<Transport>>> {
     /// Creates a new blocking controller.
     ///
     /// Transport is not resolved until the first operation that needs it.
@@ -216,11 +146,12 @@ impl BlockingController {
     /// // Using explicit DeviceAddress
     /// let mut ctrl = BlockingController::new(DeviceAddress::can_id(1));
     /// ```
-    pub fn new(address: impl Into<DeviceAddress>) -> Self {
-        Self {
+    pub fn new(address: impl Into<DeviceAddress>) -> Result<Self> {
+        let transport = get_singleton_transport(None)?;
+        Ok(Self {
             controller: Controller::new(address),
-            transport: TransportHolder::Deferred(None),
-        }
+            transport,
+        })
     }
 
     /// Creates a controller with specific transport options.
@@ -241,13 +172,17 @@ impl BlockingController {
     /// let opts = TransportOptions::new()
     ///     .socketcan_interfaces(vec!["can0"])
     ///     .timeout(std::time::Duration::from_millis(200));
-    /// let mut ctrl = BlockingController::with_options(1, &opts);
+    /// let mut ctrl = BlockingController::new_with_options(1, &opts);
     /// ```
-    pub fn with_options(address: impl Into<DeviceAddress>, options: &TransportOptions) -> Self {
-        Self {
+    pub fn new_with_options(
+        address: impl Into<DeviceAddress>,
+        options: &TransportOptions,
+    ) -> Result<Self> {
+        let transport = get_singleton_transport(Some(options))?;
+        Ok(Self {
             controller: Controller::new(address),
-            transport: TransportHolder::Deferred(Some(options.clone())),
-        }
+            transport,
+        })
     }
 
     /// Creates a blocking controller with a pre-configured Controller.
@@ -264,15 +199,21 @@ impl BlockingController {
     ///     Controller::new(1)
     ///         .query_format(QueryFormat::comprehensive())
     ///         .source_id(0x10),
-    /// );
+    /// ).unwrap();
     /// ```
-    pub fn with_controller(controller: Controller) -> Self {
-        Self {
+    pub fn with_controller(controller: Controller) -> Result<Self> {
+        let transport = get_singleton_transport(None)?;
+        Ok(Self {
             controller,
-            transport: TransportHolder::Deferred(None),
-        }
+            transport,
+        })
     }
+}
 
+impl<T> BlockingController<T>
+where
+    T: TransportOps,
+{
     /// Set an explicit transport (builder pattern).
     ///
     /// This bypasses auto-discovery and uses the provided transport directly.
@@ -286,15 +227,15 @@ impl BlockingController {
     /// fn main() -> Result<(), moteus::Error> {
     ///     let opts = TransportOptions::new();
     ///     let transport = create_default_transport(&opts)?;
-    ///     let mut ctrl = BlockingController::new(1)
-    ///         .transport(transport);
+    ///     let mut ctrl = BlockingController::new_with_transport(1, transport);
     ///     Ok(())
     /// }
     /// ```
-    #[must_use]
-    pub fn transport<T: TransportOps + Send + 'static>(mut self, t: T) -> Self {
-        self.transport = TransportHolder::Explicit(Box::new(t));
-        self
+    pub fn new_with_transport(address: impl Into<DeviceAddress>, t: T) -> Self {
+        Self {
+            controller: Controller::new(address),
+            transport: t,
+        }
     }
 
     /// Sets the communication timeout.
@@ -430,7 +371,7 @@ impl BlockingController {
     /// use moteus::query::QueryFormat;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///
     ///     // Simple position command
     ///     let result = ctrl.set_position(
@@ -551,7 +492,7 @@ impl BlockingController {
     /// use moteus::command::CurrentCommand;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.set_current(
     ///         CurrentCommand::new().q_current(0.5).d_current(0.0)
     ///     )?;
@@ -612,7 +553,7 @@ impl BlockingController {
     /// use moteus::command::VFOCCommand;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.set_vfoc(
     ///         VFOCCommand::new().theta(0.0).voltage(1.0)
     ///     )?;
@@ -670,7 +611,7 @@ impl BlockingController {
     /// use moteus::command::StayWithinCommand;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.set_stay_within(
     ///         StayWithinCommand::new()
     ///             .lower_bound(-0.5)
@@ -734,7 +675,7 @@ impl BlockingController {
     /// use moteus::command::ZeroVelocityCommand;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///
     ///     // With default kd_scale
     ///     let result = ctrl.set_zero_velocity(ZeroVelocityCommand::new())?;
@@ -884,7 +825,7 @@ impl BlockingController {
     /// use moteus::BlockingController;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let (aux1, aux2) = ctrl.read_gpio()?;
     ///
     ///     // Check individual pins
@@ -925,7 +866,7 @@ impl BlockingController {
     /// use moteus::BlockingController;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///
     ///     // Set all GPIO outputs to high
     ///     ctrl.set_write_gpio(Some(0x7f), Some(0x7f))?;
@@ -988,7 +929,7 @@ impl BlockingController {
     /// use moteus::{BlockingController, Register, Resolution};
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.custom_query(&[
     ///         (Register::Position.address(), Resolution::Float),
     ///         (Register::Velocity.address(), Resolution::Float),
@@ -1029,7 +970,7 @@ impl BlockingController {
     /// use moteus::command::AuxPwmCommand;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.set_aux_pwm(
     ///         &AuxPwmCommand::new().aux1_pwm1(0.5).aux1_pwm2(0.75)
     ///     )?;
@@ -1103,7 +1044,7 @@ impl BlockingController {
     /// use std::time::Duration;
     ///
     /// fn main() -> Result<(), moteus::Error> {
-    ///     let mut ctrl = BlockingController::new(1);
+    ///     let mut ctrl = BlockingController::new(1)?;
     ///     let result = ctrl.set_position_wait_complete(
     ///         &PositionCommand::new().position(0.5).stop_position(0.5),
     ///         Duration::from_millis(25),   // poll every 25ms
@@ -1210,7 +1151,7 @@ mod tests {
     #[test]
     fn test_with_options_is_infallible() {
         let opts = TransportOptions::new().timeout(Duration::from_millis(200));
-        let _ctrl = BlockingController::with_options(1, &opts);
+        let _ctrl = BlockingController::new_with_options(1, &opts);
     }
 
     #[test]
@@ -1220,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_explicit_transport() {
-        let mut ctrl = BlockingController::new(1).transport(NullTransport::new());
+        let mut ctrl = BlockingController::new_with_transport(1, NullTransport::new());
         assert_eq!(ctrl.controller.id, 1);
 
         // NullTransport returns no responses, so we get NoResponse error
@@ -1230,7 +1171,7 @@ mod tests {
 
     #[test]
     fn test_timeout() {
-        let mut ctrl = BlockingController::new(1).transport(NullTransport::new());
+        let mut ctrl = BlockingController::new_with_transport(1, NullTransport::new());
 
         // Default timeout
         assert_eq!(ctrl.timeout(), Duration::from_millis(100));
@@ -1241,17 +1182,8 @@ mod tests {
     }
 
     #[test]
-    fn test_deferred_timeout() {
-        // Timeout can be set before transport is resolved
-        let mut ctrl = BlockingController::new(1);
-        assert_eq!(ctrl.timeout(), Duration::from_millis(100));
-        ctrl.set_timeout(Duration::from_millis(500));
-        assert_eq!(ctrl.timeout(), Duration::from_millis(500));
-    }
-
-    #[test]
     fn test_set_position_no_query() {
-        let mut ctrl = BlockingController::new(1).transport(NullTransport::new());
+        let mut ctrl = BlockingController::new_with_transport(1, NullTransport::new());
 
         let result = ctrl.set_position_no_query(&PositionCommand::new().position(0.5));
         assert!(result.is_ok());

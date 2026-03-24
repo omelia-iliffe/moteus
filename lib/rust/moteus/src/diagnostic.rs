@@ -24,7 +24,7 @@
 //! use moteus::{BlockingController, DiagnosticStream};
 //!
 //! fn main() -> Result<(), moteus::Error> {
-//!     let mut ctrl = BlockingController::new(1);
+//!     let mut ctrl = BlockingController::new(1)?;
 //!     let mut stream = DiagnosticStream::new(&mut ctrl);
 //!
 //!     // Stop any telemetry spew and flush pending data
@@ -62,6 +62,7 @@
 use crate::command_types::Command;
 use crate::error::{Error, Result};
 use crate::transport::transaction::{FrameFilter, Request};
+use crate::TransportOps;
 use moteus_protocol::{multiplex, CanFdFrame};
 
 /// Default diagnostic channel.
@@ -197,7 +198,7 @@ use crate::blocking_controller::BlockingController;
 /// use moteus::{BlockingController, DiagnosticStream};
 ///
 /// fn main() -> Result<(), moteus::Error> {
-///     let mut ctrl = BlockingController::new(1);
+///     let mut ctrl = BlockingController::new(1)?;
 ///     let mut stream = DiagnosticStream::new(&mut ctrl);
 ///
 ///     // Always stop telemetry and flush before using diagnostic commands
@@ -210,13 +211,13 @@ use crate::blocking_controller::BlockingController;
 ///     Ok(())
 /// }
 /// ```
-pub struct DiagnosticStream<'a> {
-    controller: &'a mut BlockingController,
+pub struct DiagnosticStream<'a, T> {
+    controller: &'a mut BlockingController<T>,
     channel: u8,
     read_buffer: Vec<u8>,
 }
 
-impl<'a> std::fmt::Debug for DiagnosticStream<'a> {
+impl<'a, T> std::fmt::Debug for DiagnosticStream<'a, T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DiagnosticStream")
             .field("device_id", &self.controller.controller.id)
@@ -226,14 +227,17 @@ impl<'a> std::fmt::Debug for DiagnosticStream<'a> {
     }
 }
 
-impl<'a> DiagnosticStream<'a> {
+impl<'a, T> DiagnosticStream<'a, T>
+where
+    T: TransportOps,
+{
     /// Creates a new diagnostic stream for a controller.
-    pub fn new(controller: &'a mut BlockingController) -> Self {
+    pub fn new(controller: &'a mut BlockingController<T>) -> Self {
         Self::with_channel(controller, DEFAULT_CHANNEL)
     }
 
     /// Creates a new diagnostic stream with a specific channel.
-    pub fn with_channel(controller: &'a mut BlockingController, channel: u8) -> Self {
+    pub fn with_channel(controller: &'a mut BlockingController<T>, channel: u8) -> Self {
         Self {
             controller,
             channel,

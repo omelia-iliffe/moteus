@@ -61,8 +61,8 @@ pub use moteus_derive::Setters;
 
 // Re-export protocol types for convenience
 pub use moteus_protocol::{
-    calculate_arbitration_id, command, parse_arbitration_id, query, CanFdFrame, HomeState, Mode,
-    Register, Resolution, Scaling, Toggle, CURRENT_REGISTER_MAP_VERSION,
+    calculate_arbitration_id, command, multiplex, parse_arbitration_id, query, CanFdFrame,
+    HomeState, Mode, Register, Resolution, Scaling, Toggle, CURRENT_REGISTER_MAP_VERSION,
 };
 
 // Tokio async transport re-exports

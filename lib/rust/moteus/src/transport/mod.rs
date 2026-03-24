@@ -72,6 +72,7 @@ use crate::error::{Error, Result};
 use crate::transport::device::{TransportDevice, TransportDeviceInfo};
 use moteus_protocol::{CanFdFrame, Register, Resolution};
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 // Re-export transaction types
@@ -125,6 +126,31 @@ pub trait TransportOps {
 
     /// Returns the current timeout.
     fn timeout(&self) -> Duration;
+}
+
+impl<T> TransportOps for Arc<Mutex<T>>
+where
+    T: TransportOps,
+{
+    fn cycle(&mut self, requests: &mut [Request]) -> Result<()> {
+        self.lock().unwrap().cycle(requests)
+    }
+    fn write(&mut self, frame: &CanFdFrame) -> Result<()> {
+        self.lock().unwrap().write(frame)
+    }
+    fn read(&mut self, channel: Option<usize>) -> Result<Option<CanFdFrame>> {
+        self.lock().unwrap().read(channel)
+    }
+    fn flush_read(&mut self, channel: Option<usize>) -> Result<()> {
+        self.lock().unwrap().flush_read(channel)
+    }
+
+    fn set_timeout(&mut self, timeout: Duration) {
+        self.lock().unwrap().set_timeout(timeout);
+    }
+    fn timeout(&self) -> Duration {
+        self.lock().unwrap().timeout()
+    }
 }
 
 // =============================================================================
