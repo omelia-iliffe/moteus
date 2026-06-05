@@ -545,7 +545,7 @@ mod linux_serial {
 }
 
 #[cfg(target_os = "linux")]
-use linux_serial::LinuxSerialPort;
+pub(crate) use linux_serial::LinuxSerialPort;
 
 #[cfg(target_os = "linux")]
 impl FdcanusbDevice<LinuxSerialPort> {
